@@ -76,26 +76,34 @@ def run_status(cfg):
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"alfenctl gaf geen geldige JSON-status: {exc}") from exc
 
-def discovery_button(client, cfg, device_id, device, key, name):
+def discovery_switch(client, cfg, device_id, device, key, name):
     root = cfg["mqtt_topic_prefix"].strip("/")
-    command_topic = f"{root}/control/{key}"
-    topic = f"{cfg['discovery_prefix'].strip('/')}/button/{device_id}/{key}/config"
-    config = {"name": name, "unique_id": f"{device_id}_{key}", "command_topic": command_topic,
-              "payload_press": "PRESS", "device": device,
-              "availability_topic": f"{root}/availability",
-              "payload_available": "online", "payload_not_available": "offline"}
+    topic = f"{cfg['discovery_prefix'].strip('/')}/switch/{device_id}/{key}/config"
+    config = {
+        "name": name,
+        "unique_id": f"{device_id}_{key}",
+        "command_topic": f"{root}/control/{key}",
+        "state_topic": f"{root}/state/{key}",
+        "payload_on": "ON", "payload_off": "OFF",
+        "state_on": "ON", "state_off": "OFF",
+        "optimistic": False, "retain": False, "device": device,
+        "availability_topic": f"{root}/availability",
+        "payload_available": "online", "payload_not_available": "offline",
+    }
     client.publish(topic, json.dumps(config, ensure_ascii=False), qos=1, retain=True)
 
 def publish_control_discovery(client, cfg, device_id, device):
     socket = int(cfg["socket_number"])
-    buttons = (
-        ("socket_enable", f"Socket {socket} inschakelen"),
-        ("socket_disable", f"Socket {socket} uitschakelen (kan laden stoppen)"),
-        ("direct_start_on", "Laadprofieloverride inschakelen"),
-        ("direct_start_off", "Laadprofieloverride uitschakelen"),
+    switches = (
+        ("socket", f"Socket {socket}"),
+        ("charging_profile_override", "Laadprofieloverride"),
     )
-    for key, name in buttons:
-        discovery_button(client, cfg, device_id, device, key, name)
+    for key, name in switches:
+        discovery_switch(client, cfg, device_id, device, key, name)
+    # Remove the previous button entities from MQTT Discovery.
+    discovery_prefix = cfg["discovery_prefix"].strip("/")
+    for key in ("socket_enable", "socket_disable", "direct_start_on", "direct_start_off"):
+        client.publish(f"{discovery_prefix}/button/{device_id}/{key}/config", "", qos=1, retain=True)
     root = cfg["mqtt_topic_prefix"].strip("/")
     number_topic = f"{cfg['discovery_prefix'].strip('/')}/number/{device_id}/current_limit/config"
     number = {"name": f"Laadstroom socket {socket}", "unique_id": f"{device_id}_current_limit",
@@ -150,6 +158,24 @@ def handle_command(cfg, topic, payload, retained=False):
         f"{root}/control/direct_start_on": ("direct-start", "on", "--socket", socket),
         f"{root}/control/direct_start_off": ("direct-start", "off", "--socket", socket),
     }
+    switch_commands = {
+        f"{root}/control/socket": {
+            "ON": (("socket", "enable", socket), "ON"),
+            "OFF": (("socket", "disable", socket, "--yes"), "OFF"),
+        },
+        f"{root}/control/charging_profile_override": {
+            "ON": (("direct-start", "on", "--socket", socket), "ON"),
+            "OFF": (("direct-start", "off", "--socket", socket), "OFF"),
+        },
+    }
+    if topic in switch_commands:
+        command = switch_commands[topic].get(payload.strip().upper())
+        if command is None:
+            LOG.warning("Ongeldige schakelaarwaarde voor %s", topic)
+            return
+        run_alfen(cfg, *command[0])
+        LOG.info("Alfen-schakelaar %s ingesteld op %s", topic.rsplit("/", 1)[-1], command[1])
+        return command[1]
     if topic in fixed:
         if payload != "PRESS":
             LOG.warning("Ongeldige payload voor bedieningsknop %s", topic)
@@ -198,7 +224,7 @@ def handle_command(cfg, topic, payload, retained=False):
 
 def subscribe_commands(client, cfg):
     root = cfg["mqtt_topic_prefix"].strip("/")
-    for name in ("socket_enable", "socket_disable", "direct_start_on", "direct_start_off", "current", "comfort_power", "solar_mode"):
+    for name in ("socket", "charging_profile_override", "socket_enable", "socket_disable", "direct_start_on", "direct_start_off", "current", "comfort_power", "solar_mode"):
         client.subscribe(f"{root}/control/{name}", qos=1)
 
 def mqtt_connected(client, cfg):
@@ -214,6 +240,8 @@ def on_message(client, cfg, message):
                 f"{root}/control/solar_mode": "solar_mode",
                 f"{root}/control/current": "current_limit",
                 f"{root}/control/comfort_power": "comfort_power",
+                f"{root}/control/socket": "socket",
+                f"{root}/control/charging_profile_override": "charging_profile_override",
             }[message.topic]
             client.publish(f"{root}/state/{state_name}", current_value, qos=1, retain=True)
     except Exception as exc:
