@@ -31,7 +31,8 @@ have the management API enabled.
 
 The add-on publishes scalar fields returned by `alfenctl status --json` as
 retained MQTT state and creates a sensor or binary sensor for each field. It
-sets the suggested display precision of numeric sensors to two decimals. It
+rounds floating-point sensor values to two decimals before publishing them and
+sets Home Assistant's suggested display precision to two decimals. It
 also creates Home Assistant MQTT numbers for socket current and Comfort charging
 power (kW), a select entity for the solar charging mode (**comfort** or **green**),
 switches for the selected socket and charging-profile override, and a sensor for

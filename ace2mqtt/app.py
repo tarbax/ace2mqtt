@@ -314,7 +314,12 @@ def publish_discovery(client, cfg, state):
             continue
         topic = f"{cfg['discovery_prefix'].strip('/')}/{component}/{device_id}/{entity}/config"
         client.publish(topic, json.dumps(config, ensure_ascii=False), qos=1, retain=True)
-        payload = str(value).lower() if isinstance(value, bool) else str(value)
+        if isinstance(value, bool):
+            payload = str(value).lower()
+        elif isinstance(value, (int, float)):
+            payload = f"{value:.2f}" if isinstance(value, float) else str(value)
+        else:
+            payload = str(value)
         client.publish(state_topic, payload, qos=1, retain=True)
 
 def parse_current_limit(output, socket_number):
