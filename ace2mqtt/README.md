@@ -21,7 +21,7 @@ have the management API enabled.
 | `charger_username` / `charger_password` | Charger login |
 | `charger_http` | Use HTTP for older stations |
 | `socket_number` | Socket selected by control buttons and current command |
-| `current_min` / `current_max` | Locally allowed current range in A (1–80; defaults 6–32) |
+| `current_min` / `current_max` | Locally allowed current range in A (1–80; defaults 6–32); the live station maximum further caps the slider and accepted commands |
 | `comfort_power_max_kw` | Upper limit for the Comfort power number in kW (1.35–22; default 4.0) |
 | `poll_interval` | Poll period in seconds (5–300) |
 | `mqtt_host`, `mqtt_port` | MQTT broker address |

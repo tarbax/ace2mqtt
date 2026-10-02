@@ -96,6 +96,18 @@ def discovery_switch(client, cfg, device_id, device, key, name):
     }
     client.publish(topic, json.dumps(config, ensure_ascii=False), qos=1, retain=True)
 
+def effective_current_bounds(cfg):
+    """Apply the live station-wide current ceiling to the configured bounds."""
+    local_min = int(cfg["current_min"])
+    effective_max = int(cfg["current_max"])
+    try:
+        station_limit = float(cfg.get("_station_max_current_a"))
+    except (TypeError, ValueError):
+        station_limit = math.nan
+    if math.isfinite(station_limit) and station_limit >= 0:
+        effective_max = min(effective_max, math.floor(station_limit))
+    return min(local_min, effective_max), effective_max
+
 def publish_control_discovery(client, cfg, device_id, device):
     socket = int(cfg["socket_number"])
     switches = (
@@ -121,10 +133,11 @@ def publish_control_discovery(client, cfg, device_id, device):
     }
     client.publish(rfid_topic, json.dumps(rfid_sensor, ensure_ascii=False), qos=1, retain=True)
     number_topic = f"{cfg['discovery_prefix'].strip('/')}/number/{device_id}/current_limit/config"
+    current_min, current_max = effective_current_bounds(cfg)
     number = {"name": f"Laadstroom socket {socket}", "unique_id": f"{device_id}_current_limit",
               "command_topic": f"{root}/control/current", "state_topic": f"{root}/state/current_limit",
-              "min": int(cfg["current_min"]),
-              "max": int(cfg["current_max"]), "step": 1, "unit_of_measurement": "A",
+              "min": current_min,
+              "max": current_max, "step": 1, "unit_of_measurement": "A",
               "mode": "slider", "optimistic": False, "retain": False, "device": device,
               "availability_topic": f"{root}/availability", "payload_available": "online",
               "payload_not_available": "offline"}
@@ -208,8 +221,9 @@ def handle_command(cfg, topic, payload, retained=False):
             LOG.warning("Laadstroom moet een geheel aantal ampere zijn")
             return
         amps = int(numeric_amps)
-        if not int(cfg["current_min"]) <= amps <= int(cfg["current_max"]):
-            LOG.warning("Laadstroom buiten ingestelde grens (%s-%s A)", cfg["current_min"], cfg["current_max"])
+        current_min, current_max = effective_current_bounds(cfg)
+        if not current_min <= amps <= current_max:
+            LOG.warning("Laadstroom buiten ingestelde grens (%s-%s A)", current_min, current_max)
             return
         run_alfen(cfg, "current", "set", str(amps), "--socket", socket)
         LOG.info("Laadstroominstelling voor socket %s bijgewerkt", socket)
@@ -294,6 +308,15 @@ def connect_mqtt(cfg):
 
 def publish_discovery(client, cfg, state):
     root = cfg["mqtt_topic_prefix"].strip("/")
+    station_limit = state.get("max_station_current_a") if isinstance(state, dict) else None
+    try:
+        station_limit = float(station_limit)
+    except (TypeError, ValueError):
+        station_limit = math.nan
+    if math.isfinite(station_limit) and station_limit >= 0:
+        cfg["_station_max_current_a"] = station_limit
+    else:
+        cfg.pop("_station_max_current_a", None)
     device_id = "ace2mqtt_" + clean_id(cfg["charger_host"])
     device = {"identifiers": [device_id], "name": "Alfen laadpaal", "manufacturer": "Alfen",
               "model": "Alfen EV charger"}
