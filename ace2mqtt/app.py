@@ -54,7 +54,10 @@ def write_alfen_config(cfg):
     os.chmod("/data/alfen.toml", 0o600)
 
 def alfen_command(cfg, *args):
-    return ["alfenctl", "--config", "/data/alfen.toml", *args,
+    # alfenctl adds these as common options to each command parser, not to the
+    # root parser. Keep them after the command/action so argparse recognizes
+    # the command before parsing its connection options.
+    return ["alfenctl", *args, "--config", "/data/alfen.toml",
             "--port", str(cfg["charger_port"]), "--station", "ace2mqtt"]
 
 def run_alfen(cfg, *args, timeout=30):

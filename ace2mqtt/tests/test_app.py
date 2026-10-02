@@ -32,8 +32,9 @@ CFG = {
 class AlfenCommandTests(unittest.TestCase):
     def test_builds_station_command_with_port_and_no_shell(self):
         command = app.alfen_command(CFG, "current", "set", "16", "--socket", "2")
-        self.assertEqual(command, ["alfenctl", "--config", "/data/alfen.toml", "current", "set",
-                                   "16", "--socket", "2", "--port", "443", "--station", "ace2mqtt"])
+        self.assertEqual(command, ["alfenctl", "current", "set", "16", "--socket", "2",
+                                   "--config", "/data/alfen.toml", "--port", "443",
+                                   "--station", "ace2mqtt"])
         self.assertNotIsInstance(command, str)
 
     @patch("app.run_alfen")
