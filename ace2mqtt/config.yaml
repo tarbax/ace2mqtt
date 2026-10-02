@@ -1,6 +1,6 @@
 name: "ace2mqtt"
 slug: "ace2mqtt"
-version: "0.1.6"
+version: "0.1.7"
 description: "Lees Alfen laadpaalstatus uit en publiceer die via MQTT met Home Assistant Discovery."
 url: "https://github.com/tarbax/ace2mqtt/tree/main/ace2mqtt"
 arch:

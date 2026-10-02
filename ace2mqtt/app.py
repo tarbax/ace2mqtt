@@ -109,6 +109,17 @@ def publish_control_discovery(client, cfg, device_id, device):
     for key in ("socket_enable", "socket_disable", "direct_start_on", "direct_start_off"):
         client.publish(f"{discovery_prefix}/button/{device_id}/{key}/config", "", qos=1, retain=True)
     root = cfg["mqtt_topic_prefix"].strip("/")
+    rfid_topic = f"{discovery_prefix}/sensor/{device_id}/rfid_id/config"
+    rfid_sensor = {
+        "name": "Laatste RFID-ID",
+        "unique_id": f"{device_id}_rfid_id",
+        "state_topic": f"{root}/state/rfid_id",
+        "icon": "mdi:card-account-details",
+        "device": device,
+        "availability_topic": f"{root}/availability",
+        "payload_available": "online", "payload_not_available": "offline",
+    }
+    client.publish(rfid_topic, json.dumps(rfid_sensor, ensure_ascii=False), qos=1, retain=True)
     number_topic = f"{cfg['discovery_prefix'].strip('/')}/number/{device_id}/current_limit/config"
     number = {"name": f"Laadstroom socket {socket}", "unique_id": f"{device_id}_current_limit",
               "command_topic": f"{root}/control/current", "state_topic": f"{root}/state/current_limit",
@@ -362,6 +373,52 @@ def parse_comfort_power(output):
         return None
     return format(Decimal(watts) / 1000, "f")
 
+def needs_rfid_readback(status, socket_number):
+    """Whether the selected socket currently reports a card authorization."""
+    sockets = status.get("sockets", []) if isinstance(status, dict) else []
+    for socket in sockets:
+        if not isinstance(socket, dict) or int(socket.get("socket", 0)) != int(socket_number):
+            continue
+        states = {str(socket.get(key, "")).strip().lower() for key in ("state", "display")}
+        if states & {"nfc authorised", "nfc authorized", "authorised", "authorized"}:
+            return True
+    return False
+
+def parse_latest_rfid_id(output, socket_number):
+    """Read the latest authorized card ID recorded for the selected socket."""
+    try:
+        records = json.loads(output)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(records, list):
+        return None
+    target_socket = int(socket_number)
+    for record in reversed(records):
+        if not isinstance(record, dict) or record.get("socket") != target_socket:
+            continue
+        tag = record.get("start_tag")
+        if isinstance(tag, str) and tag.strip():
+            return tag.strip()
+    return None
+
+def publish_latest_rfid_id(client, cfg):
+    """Fetch and publish the latest card recorded on the selected socket."""
+    try:
+        with ALFEN_LOCK:
+            output = run_alfen(cfg, "transactions", "--json", "--since", "today",
+                               "--socket", str(cfg["socket_number"]), timeout=60)
+            tag = parse_latest_rfid_id(output, cfg["socket_number"])
+            if tag is None:
+                LOG.info("Geen RFID-ID gevonden in de laadtransacties")
+                return False
+            root = cfg["mqtt_topic_prefix"].strip("/")
+            client.publish(f"{root}/state/rfid_id", tag, qos=1, retain=True)
+            LOG.info("RFID-ID van de geautoriseerde laadpas gepubliceerd")
+            return True
+    except Exception as exc:
+        LOG.warning("RFID-ID uitlezen mislukt: %s", exc)
+        return False
+
 def publish_comfort_power_readback(client, cfg):
     try:
         with ALFEN_LOCK:
@@ -388,10 +445,19 @@ def main():
             current_readback_published = False
             solar_mode_readback_published = False
             comfort_power_readback_published = False
+            rfid_authorization_handled = False
+            rfid_readback_attempts = 0
             LOG.info("Verbonden met MQTT; Alfen status wordt opgehaald van %s", cfg["charger_host"])
             while True:
                 status = run_status(cfg)
                 publish_discovery(client, cfg, status)
+                rfid_authorization_active = needs_rfid_readback(status, cfg["socket_number"])
+                if rfid_authorization_active and not rfid_authorization_handled and rfid_readback_attempts < 2:
+                    rfid_authorization_handled = publish_latest_rfid_id(client, cfg)
+                    rfid_readback_attempts += 1
+                elif not rfid_authorization_active:
+                    rfid_authorization_handled = False
+                    rfid_readback_attempts = 0
                 if not current_readback_published:
                     current_readback_published = publish_current_readback(client, cfg)
                 if not solar_mode_readback_published:

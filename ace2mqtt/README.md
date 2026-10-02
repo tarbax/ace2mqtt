@@ -34,8 +34,13 @@ retained MQTT state and creates a sensor or binary sensor for each field. It
 sets the suggested display precision of numeric sensors to two decimals. It
 also creates Home Assistant MQTT numbers for socket current and Comfort charging
 power (kW), a select entity for the solar charging mode (**comfort** or **green**),
-and switches for the selected socket and charging-profile override. Turning the
+switches for the selected socket and charging-profile override, and a sensor for
+the latest RFID ID recorded in a charging transaction. Turning the
 socket switch off may stop an active charging session.
+
+The RFID sensor is updated when the selected socket reports an authorized card
+and Alfen has recorded its transaction. Rejected card scans do not expose a card
+ID through the status interface and therefore cannot be reported by this sensor.
 
 To set a socket's current limit, use the discovered number entity or publish
 an integer amp value to `ace2mqtt/control/current` (replace `ace2mqtt` with
