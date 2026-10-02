@@ -264,6 +264,8 @@ def publish_discovery(client, cfg, state):
         if isinstance(value, bool):
             component = "binary_sensor"
             config.update({"payload_on": "true", "payload_off": "false"})
+        elif isinstance(value, (int, float)):
+            config["suggested_display_precision"] = 2
         if value is None or isinstance(value, (dict, list)):
             continue
         topic = f"{cfg['discovery_prefix'].strip('/')}/{component}/{device_id}/{entity}/config"
