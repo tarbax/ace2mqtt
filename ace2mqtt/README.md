@@ -30,8 +30,8 @@ have the management API enabled.
 
 The add-on publishes scalar fields returned by `alfenctl status --json` as
 retained MQTT state and creates a sensor or binary sensor for each field. It
-also creates a Home Assistant MQTT number for socket current, a select entity
-for the solar charging mode (**comfort** or **green**), and buttons to
+also creates Home Assistant MQTT numbers for socket current and Comfort charging
+power (kW), a select entity for the solar charging mode (**comfort** or **green**), and buttons to
 enable/disable the selected socket and turn the charging-profile override on
 or off. The socket-disable button says that it can stop a live session;
 pressing it explicitly confirms that operation.
@@ -43,7 +43,9 @@ the charger still applies its own limits. The command topic is never retained.
 The other command topics are `.../control/socket_enable`,
 `.../control/socket_disable`, `.../control/direct_start_on` and
 `.../control/direct_start_off`; discovered buttons publish `PRESS` to these
-topics. The mode select publishes `comfort` or `green` to
+topics. Comfort power accepts 1.35–22.00 kW in 0.05 kW steps and writes Alfen
+property `3280_3` in watts; the charger's own supported range may be narrower.
+The mode select publishes `comfort` or `green` to
 `.../control/solar_mode`. Retained control messages are ignored. The add-on does not expose
 firmware upgrades, factory reset, credential changes, network settings or
 arbitrary property commands.

@@ -8,6 +8,7 @@ import re
 import subprocess
 import threading
 import time
+from decimal import Decimal, InvalidOperation
 
 import paho.mqtt.client as mqtt
 
@@ -105,6 +106,19 @@ def publish_control_discovery(client, cfg, device_id, device):
               "availability_topic": f"{root}/availability", "payload_available": "online",
               "payload_not_available": "offline"}
     client.publish(number_topic, json.dumps(number, ensure_ascii=False), qos=1, retain=True)
+    comfort_topic = f"{cfg['discovery_prefix'].strip('/')}/number/{device_id}/comfort_power/config"
+    comfort_number = {
+        "name": "Comfort laadvermogen",
+        "unique_id": f"{device_id}_comfort_power",
+        "command_topic": f"{root}/control/comfort_power",
+        "state_topic": f"{root}/state/comfort_power",
+        "min": 1.35, "max": 22.0, "step": 0.05,
+        "unit_of_measurement": "kW", "mode": "slider",
+        "optimistic": False, "retain": False, "device": device,
+        "availability_topic": f"{root}/availability",
+        "payload_available": "online", "payload_not_available": "offline",
+    }
+    client.publish(comfort_topic, json.dumps(comfort_number, ensure_ascii=False), qos=1, retain=True)
     solar_topic = f"{cfg['discovery_prefix'].strip('/')}/select/{device_id}/solar_mode/config"
     solar_select = {
         "name": "Laadmodus",
@@ -159,6 +173,19 @@ def handle_command(cfg, topic, payload, retained=False):
         run_alfen(cfg, "current", "set", str(amps), "--socket", socket)
         LOG.info("Laadstroominstelling voor socket %s bijgewerkt", socket)
         return str(amps)
+    if topic == f"{root}/control/comfort_power":
+        try:
+            kw = Decimal(payload.strip())
+        except (InvalidOperation, ValueError):
+            LOG.warning("Ongeldig comfortvermogen ontvangen")
+            return
+        if not kw.is_finite() or kw < Decimal("1.35") or kw > Decimal("22.00") or (kw * 1000) % 50:
+            LOG.warning("Comfortvermogen moet 1,35-22,00 kW zijn in stappen van 0,05 kW")
+            return
+        watts = int(kw * 1000)
+        run_alfen(cfg, "set", "3280_3", str(watts))
+        LOG.info("Comfortvermogen ingesteld op %s kW", kw)
+        return format(kw.normalize(), "f")
     if topic == f"{root}/control/solar_mode":
         mode = payload.strip().lower()
         if mode not in ("comfort", "green"):
@@ -171,7 +198,7 @@ def handle_command(cfg, topic, payload, retained=False):
 
 def subscribe_commands(client, cfg):
     root = cfg["mqtt_topic_prefix"].strip("/")
-    for name in ("socket_enable", "socket_disable", "direct_start_on", "direct_start_off", "current", "solar_mode"):
+    for name in ("socket_enable", "socket_disable", "direct_start_on", "direct_start_off", "current", "comfort_power", "solar_mode"):
         client.subscribe(f"{root}/control/{name}", qos=1)
 
 def mqtt_connected(client, cfg):
@@ -183,7 +210,11 @@ def on_message(client, cfg, message):
         current_value = handle_command(cfg, message.topic, payload, message.retain)
         if current_value is not None:
             root = cfg["mqtt_topic_prefix"].strip("/")
-            state_name = "solar_mode" if message.topic == f"{root}/control/solar_mode" else "current_limit"
+            state_name = {
+                f"{root}/control/solar_mode": "solar_mode",
+                f"{root}/control/current": "current_limit",
+                f"{root}/control/comfort_power": "comfort_power",
+            }[message.topic]
             client.publish(f"{root}/state/{state_name}", current_value, qos=1, retain=True)
     except Exception as exc:
         LOG.error("Bedieningscommando mislukt: %s", exc)
@@ -286,6 +317,31 @@ def publish_solar_mode_readback(client, cfg):
         LOG.warning("Laadmodus teruglezen mislukt: %s", exc)
         return False
 
+def parse_comfort_power(output):
+    """Read the comfort level property, reported by alfenctl in watts."""
+    match = re.search(r"(?<![\w])(\d{4,5})(?![\w])", output)
+    if not match:
+        return None
+    watts = int(match.group(1))
+    if watts < 1350 or watts > 22000 or watts % 50:
+        return None
+    return format(Decimal(watts) / 1000, "f")
+
+def publish_comfort_power_readback(client, cfg):
+    try:
+        with ALFEN_LOCK:
+            output = run_alfen(cfg, "get", "3280_3", timeout=20)
+            value = parse_comfort_power(output)
+            if value is None:
+                LOG.warning("Kon het comfortvermogen niet uit alfenctl lezen")
+                return False
+            root = cfg["mqtt_topic_prefix"].strip("/")
+            client.publish(f"{root}/state/comfort_power", value, qos=1, retain=True)
+            return True
+    except Exception as exc:
+        LOG.warning("Comfortvermogen teruglezen mislukt: %s", exc)
+        return False
+
 def main():
     cfg = options()
     validate_options(cfg)
@@ -296,6 +352,7 @@ def main():
             client = connect_mqtt(cfg)
             current_readback_published = False
             solar_mode_readback_published = False
+            comfort_power_readback_published = False
             LOG.info("Verbonden met MQTT; Alfen status wordt opgehaald van %s", cfg["charger_host"])
             while True:
                 status = run_status(cfg)
@@ -304,6 +361,8 @@ def main():
                     current_readback_published = publish_current_readback(client, cfg)
                 if not solar_mode_readback_published:
                     solar_mode_readback_published = publish_solar_mode_readback(client, cfg)
+                if not comfort_power_readback_published:
+                    comfort_power_readback_published = publish_comfort_power_readback(client, cfg)
                 client.publish(f"{cfg['mqtt_topic_prefix'].strip('/')}/availability", "online", qos=1, retain=True)
                 time.sleep(int(cfg["poll_interval"]))
         except KeyboardInterrupt:

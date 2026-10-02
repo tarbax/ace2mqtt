@@ -83,6 +83,24 @@ class AlfenCommandTests(unittest.TestCase):
         self.assertIsNone(app.handle_command(CFG, "ace2mqtt/control/solar_mode", "comfort", retained=True))
         run.assert_not_called()
 
+    @patch("app.run_alfen")
+    def test_comfort_power_converts_kw_to_watts_and_validates_step(self, run):
+        self.assertEqual(app.handle_command(CFG, "ace2mqtt/control/comfort_power", "4.20"), "4.2")
+        run.assert_called_once_with(CFG, "set", "3280_3", "4200")
+        run.reset_mock()
+        for value in ("1.34", "22.05", "4.23", "nan", "4.2 kW"):
+            with self.subTest(value=value):
+                self.assertIsNone(app.handle_command(CFG, "ace2mqtt/control/comfort_power", value))
+        run.assert_not_called()
+
+    def test_comfort_power_command_publishes_confirmed_state(self):
+        client = Mock()
+        message = types.SimpleNamespace(topic="ace2mqtt/control/comfort_power", payload=b"4.2", retain=False)
+        with patch("app.run_alfen") as run:
+            app.on_message(client, CFG, message)
+        run.assert_called_once_with(CFG, "set", "3280_3", "4200")
+        client.publish.assert_called_once_with("ace2mqtt/state/comfort_power", "4.2", qos=1, retain=True)
+
     def test_solar_mode_command_publishes_confirmed_state(self):
         client = Mock()
         message = types.SimpleNamespace(topic="ace2mqtt/control/solar_mode", payload=b"green", retain=False)
@@ -115,20 +133,24 @@ class AlfenCommandTests(unittest.TestCase):
 
 
 class DiscoveryTests(unittest.TestCase):
-    def test_control_discovery_creates_four_buttons(self):
+    def test_control_discovery_creates_buttons_and_numbers(self):
         client = Mock()
         app.publish_control_discovery(client, CFG, "ace2mqtt_192_0_2_10", {"identifiers": ["x"]})
-        self.assertEqual(client.publish.call_count, 6)
+        self.assertEqual(client.publish.call_count, 7)
         first = client.publish.call_args_list[0].args
         data = json.loads(first[1])
         self.assertEqual(first[0], "homeassistant/button/ace2mqtt_192_0_2_10/socket_enable/config")
         self.assertEqual(data["command_topic"], "ace2mqtt/control/socket_enable")
         self.assertEqual(data["payload_press"], "PRESS")
-        number_config = json.loads(client.publish.call_args_list[-2].args[1])
+        number_config = json.loads(client.publish.call_args_list[-3].args[1])
         self.assertEqual(number_config["command_topic"], "ace2mqtt/control/current")
         self.assertEqual(number_config["state_topic"], "ace2mqtt/state/current_limit")
         self.assertEqual(number_config["min"], 6)
         self.assertFalse(number_config["optimistic"])
+        comfort_config = json.loads(client.publish.call_args_list[-2].args[1])
+        self.assertEqual(comfort_config["command_topic"], "ace2mqtt/control/comfort_power")
+        self.assertEqual(comfort_config["unit_of_measurement"], "kW")
+        self.assertEqual(comfort_config["step"], 0.05)
         select_config = json.loads(client.publish.call_args_list[-1].args[1])
         self.assertEqual(client.publish.call_args_list[-1].args[0],
                          "homeassistant/select/ace2mqtt_192_0_2_10/solar_mode/config")
@@ -151,6 +173,15 @@ class DiscoveryTests(unittest.TestCase):
             self.assertTrue(app.publish_solar_mode_readback(client, CFG))
         run.assert_called_once_with(CFG, "lb", timeout=20)
         client.publish.assert_called_once_with("ace2mqtt/state/solar_mode", "comfort", qos=1, retain=True)
+
+    def test_comfort_power_readback_parses_watts_and_publishes_kw(self):
+        self.assertEqual(app.parse_comfort_power("3280_3 (Solar Comfort Level) = 4200 W"), "4.2")
+        self.assertIsNone(app.parse_comfort_power("3280_3 = 4225 W"))
+        client = Mock()
+        with patch("app.run_alfen", return_value="3280_3 = 4200 W") as run:
+            self.assertTrue(app.publish_comfort_power_readback(client, CFG))
+        run.assert_called_once_with(CFG, "get", "3280_3", timeout=20)
+        client.publish.assert_called_once_with("ace2mqtt/state/comfort_power", "4.2", qos=1, retain=True)
 
     def test_flatten_skips_non_finite_numbers(self):
         self.assertEqual(app.flatten({"socket": {"amps": 12.5, "unknown": float("nan")}, "active": True}),
