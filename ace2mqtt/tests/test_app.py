@@ -132,6 +132,59 @@ class AlfenCommandTests(unittest.TestCase):
         chmod.assert_called_once_with("/data/alfen.toml", 0o600)
 
 
+class EvccBridgeTests(unittest.TestCase):
+    EVCC_CFG = {
+        **CFG,
+        "evcc_base_url": "http://evcc.local:7070/",
+        "evcc_loadpoint_id": 2,
+        "uid_vehicle_map": '{"04AABBCCDDEEFF":"bmw x/130e"}',
+    }
+
+    def test_uid_normalization_matches_case_and_separators(self):
+        self.assertEqual(app.normalise_uid("04:aa-bb cc:dd-ee-ff"), "04AABBCCDDEEFF")
+        self.assertEqual(app.uid_vehicle_map(self.EVCC_CFG), {"04AABBCCDDEEFF": "bmw x/130e"})
+
+    @patch("app.requests.post")
+    def test_known_uid_posts_encoded_evcc_vehicle_path(self, post):
+        post.return_value.raise_for_status.return_value = None
+        self.assertTrue(app.assign_evcc_vehicle(self.EVCC_CFG, "04:aa:bb:cc:dd:ee:ff"))
+        post.assert_called_once_with(
+            "http://evcc.local:7070/api/loadpoints/2/vehicle/bmw%20x%2F130e", timeout=10
+        )
+
+    @patch("app.requests.post")
+    def test_unknown_uid_does_not_call_evcc(self, post):
+        self.assertFalse(app.assign_evcc_vehicle(self.EVCC_CFG, "11223344"))
+        post.assert_not_called()
+
+    @patch("app.requests.post")
+    def test_evcc_is_disabled_when_base_url_is_empty(self, post):
+        self.assertFalse(app.assign_evcc_vehicle({**CFG, "uid_vehicle_map": self.EVCC_CFG["uid_vehicle_map"]},
+                                                 "04AABBCCDDEEFF"))
+        post.assert_not_called()
+
+    @patch("app.time.sleep")
+    @patch("app.requests.post", side_effect=app.requests.RequestException("offline"))
+    def test_evcc_failure_retries_with_bounded_backoff(self, post, sleep):
+        self.assertFalse(app.assign_evcc_vehicle(self.EVCC_CFG, "04AABBCCDDEEFF"))
+        self.assertEqual(post.call_count, 4)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 3, 5])
+
+    @patch("app.assign_evcc_vehicle")
+    @patch("app.run_alfen", return_value='[{"socket": 2, "start_tag": "04:AABBCCDDEEFF"}]')
+    def test_rfid_readback_keeps_mqtt_publication_and_calls_evcc(self, run, assign):
+        client = Mock()
+        self.assertTrue(app.publish_latest_rfid_id(client, CFG))
+        client.publish.assert_called_once_with(
+            "ace2mqtt/state/rfid_id", "04:AABBCCDDEEFF", qos=1, retain=True
+        )
+        assign.assert_called_once_with(CFG, "04:AABBCCDDEEFF")
+
+    def test_invalid_evcc_map_is_rejected(self):
+        with self.assertRaises(ValueError):
+            app.validate_options({**CFG, "uid_vehicle_map": '["not", "an object"]'})
+
+
 class DiscoveryTests(unittest.TestCase):
     def test_control_discovery_creates_buttons_and_numbers(self):
         client = Mock()

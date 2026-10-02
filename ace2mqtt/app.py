@@ -9,12 +9,15 @@ import subprocess
 import threading
 import time
 from decimal import Decimal, InvalidOperation
+from urllib.parse import quote
 
 import paho.mqtt.client as mqtt
+import requests
 
 LOG = logging.getLogger("ace2mqtt")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 ALFEN_LOCK = threading.RLock()
+EVCC_RETRY_DELAYS = (1, 3, 5)
 
 def clean_id(value):
     return re.sub(r"[^a-z0-9_]+", "_", value.lower()).strip("_") or "value"
@@ -40,6 +43,18 @@ def validate_options(cfg):
         value = str(cfg[key]).strip("/")
         if not value or any(char in value for char in ("+", "#", " ")):
             raise ValueError(f"Instelling '{key}' bevat een ongeldig MQTT-topicdeel")
+    if str(cfg.get("evcc_base_url", "")).strip():
+        if not str(cfg["evcc_base_url"]).strip().startswith(("http://", "https://")):
+            raise ValueError("evcc_base_url moet met http:// of https:// beginnen")
+        try:
+            if int(cfg.get("evcc_loadpoint_id", 1)) < 1:
+                raise ValueError
+        except (TypeError, ValueError):
+            raise ValueError("evcc_loadpoint_id moet een positief geheel getal zijn") from None
+    try:
+        uid_vehicle_map(cfg)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("uid_vehicle_map moet een JSON-object met UID-voertuignaamparen zijn") from exc
 
 def toml_string(value):
     return json.dumps(str(value), ensure_ascii=False)
@@ -429,6 +444,53 @@ def parse_latest_rfid_id(output, socket_number):
             return tag.strip()
     return None
 
+def normalise_uid(value):
+    """Remove UID separators and standardise hexadecimal identifiers."""
+    return re.sub(r"[^A-Za-z0-9]", "", str(value)).upper()
+
+def uid_vehicle_map(cfg):
+    """Read the add-on's JSON UID-to-evcc-vehicle mapping."""
+    raw = cfg.get("uid_vehicle_map", "{}")
+    mapping = json.loads(raw) if isinstance(raw, str) else raw
+    if not isinstance(mapping, dict):
+        raise TypeError("uid_vehicle_map must be a JSON object")
+    result = {}
+    for uid, vehicle in mapping.items():
+        key = normalise_uid(uid)
+        name = str(vehicle).strip()
+        if key and name:
+            result[key] = name
+    return result
+
+def assign_evcc_vehicle(cfg, tag):
+    """Map one Alfen RFID UID to an EVCC vehicle and assign it to the loadpoint."""
+    base_url = str(cfg.get("evcc_base_url", "")).strip().rstrip("/")
+    if not base_url:
+        return False
+    uid = normalise_uid(tag)
+    vehicle = uid_vehicle_map(cfg).get(uid)
+    if not vehicle:
+        LOG.info("RFID-ID heeft geen evcc-voertuigkoppeling")
+        return False
+
+    loadpoint = int(cfg.get("evcc_loadpoint_id", 1))
+    path = f"/api/loadpoints/{loadpoint}/vehicle/{quote(vehicle, safe='')}"
+    url = f"{base_url}{path}"
+    for attempt, delay in enumerate((0,) + EVCC_RETRY_DELAYS):
+        if delay:
+            time.sleep(delay)
+        try:
+            response = requests.post(url, timeout=10)
+            response.raise_for_status()
+            LOG.info("evcc-laadpunt %s ingesteld op voertuig %s", loadpoint, vehicle)
+            return True
+        except Exception as exc:
+            if attempt < len(EVCC_RETRY_DELAYS):
+                LOG.warning("evcc-aanroep mislukt: %s (opnieuw proberen)", exc)
+            else:
+                LOG.error("evcc-aanroep mislukt; retries opgebruikt: %s", exc)
+    return False
+
 def publish_latest_rfid_id(client, cfg):
     """Fetch and publish the latest card recorded on the selected socket."""
     try:
@@ -436,16 +498,17 @@ def publish_latest_rfid_id(client, cfg):
             output = run_alfen(cfg, "transactions", "--json", "--since", "today",
                                "--socket", str(cfg["socket_number"]), timeout=60)
             tag = parse_latest_rfid_id(output, cfg["socket_number"])
-            if tag is None:
-                LOG.info("Geen RFID-ID gevonden in de laadtransacties")
-                return False
-            root = cfg["mqtt_topic_prefix"].strip("/")
-            client.publish(f"{root}/state/rfid_id", tag, qos=1, retain=True)
-            LOG.info("RFID-ID van de geautoriseerde laadpas gepubliceerd")
-            return True
     except Exception as exc:
         LOG.warning("RFID-ID uitlezen mislukt: %s", exc)
         return False
+    if tag is None:
+        LOG.info("Geen RFID-ID gevonden in de laadtransacties")
+        return False
+    root = cfg["mqtt_topic_prefix"].strip("/")
+    client.publish(f"{root}/state/rfid_id", tag, qos=1, retain=True)
+    LOG.info("RFID-ID van de geautoriseerde laadpas gepubliceerd")
+    assign_evcc_vehicle(cfg, tag)
+    return True
 
 def publish_comfort_power_readback(client, cfg):
     try:

@@ -26,6 +26,9 @@ options:
   mqtt_password: ""
   mqtt_topic_prefix: "ace2mqtt"
   discovery_prefix: "homeassistant"
+  evcc_base_url: ""
+  evcc_loadpoint_id: 1
+  uid_vehicle_map: "{}"
 schema:
   charger_host: str
   charger_port: port
@@ -43,3 +46,6 @@ schema:
   mqtt_password: password
   mqtt_topic_prefix: str
   discovery_prefix: str
+  evcc_base_url: str
+  evcc_loadpoint_id: int
+  uid_vehicle_map: str

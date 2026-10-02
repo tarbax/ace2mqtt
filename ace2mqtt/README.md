@@ -28,6 +28,9 @@ have the management API enabled.
 | `mqtt_username`, `mqtt_password` | Optional broker credentials |
 | `mqtt_topic_prefix` | State and availability topic prefix |
 | `discovery_prefix` | Home Assistant Discovery prefix |
+| `evcc_base_url` | Optional evcc REST base URL, for example `http://evcc:7070`; leave blank to disable the bridge |
+| `evcc_loadpoint_id` | evcc loadpoint ID to assign a vehicle to (default `1`) |
+| `uid_vehicle_map` | JSON object mapping Alfen RFID UIDs to evcc vehicle `name` values, for example `{"04AABBCCDDEEFF":"bmwx130e"}` |
 
 The add-on publishes scalar fields returned by `alfenctl status --json` as
 retained MQTT state and creates a sensor or binary sensor for each field. It
@@ -42,6 +45,14 @@ socket switch off may stop an active charging session.
 The RFID sensor is updated when the selected socket reports an authorized card
 and Alfen has recorded its transaction. Rejected card scans do not expose a card
 ID through the status interface and therefore cannot be reported by this sensor.
+
+When `evcc_base_url` and `uid_vehicle_map` are configured, the same authorized
+RFID ID is normalised (separators removed, uppercase) and matched against the
+map. A match assigns the mapped evcc vehicle to `evcc_loadpoint_id` through the
+evcc REST API. Configure the exact vehicle `name` from evcc, not its display
+title. Unknown IDs are ignored. The bridge does not clear the vehicle on
+disconnect; evcc's own loadpoint behavior remains in control. Leave
+`evcc_base_url` empty to keep the evcc integration disabled.
 
 To set a socket's current limit, use the discovered number entity or publish
 an integer amp value to `ace2mqtt/control/current` (replace `ace2mqtt` with
