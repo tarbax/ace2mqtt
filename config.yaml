@@ -1,0 +1,42 @@
+name: "ace2mqtt"
+slug: "ace2mqtt"
+version: "0.1.0"
+description: "Lees Alfen laadpaalstatus uit en publiceer die via MQTT met Home Assistant Discovery."
+arch:
+  - amd64
+  - aarch64
+startup: application
+boot: auto
+init: false
+options:
+  charger_host: ""
+  charger_port: 443
+  charger_username: "admin"
+  charger_password: ""
+  charger_http: false
+  socket_number: 1
+  current_min: 6
+  current_max: 32
+  poll_interval: 10
+  mqtt_host: "core-mosquitto"
+  mqtt_port: 1883
+  mqtt_username: ""
+  mqtt_password: ""
+  mqtt_topic_prefix: "ace2mqtt"
+  discovery_prefix: "homeassistant"
+schema:
+  charger_host: str
+  charger_port: port
+  charger_username: str
+  charger_password: password
+  charger_http: bool
+  socket_number: int(1,2)
+  current_min: int(1,80)
+  current_max: int(1,80)
+  poll_interval: int(5,300)
+  mqtt_host: str
+  mqtt_port: port
+  mqtt_username: str
+  mqtt_password: password
+  mqtt_topic_prefix: str
+  discovery_prefix: str
