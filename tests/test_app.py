@@ -72,6 +72,23 @@ class AlfenCommandTests(unittest.TestCase):
             app.handle_command(CFG, "ace2mqtt/control/current", "16.0")
         run.assert_called_once_with(CFG, "current", "set", "16", "--socket", "2")
 
+    @patch("app.run_alfen")
+    def test_solar_mode_only_allows_comfort_or_green(self, run):
+        self.assertEqual(app.handle_command(CFG, "ace2mqtt/control/solar_mode", "GREEN"), "green")
+        run.assert_called_once_with(CFG, "lb", "set", "--solar-mode", "green")
+        run.reset_mock()
+        self.assertEqual(app.handle_command(CFG, "ace2mqtt/control/solar_mode", "off"), None)
+        run.assert_not_called()
+        self.assertIsNone(app.handle_command(CFG, "ace2mqtt/control/solar_mode", "comfort", retained=True))
+        run.assert_not_called()
+
+    def test_solar_mode_command_publishes_confirmed_state(self):
+        client = Mock()
+        message = types.SimpleNamespace(topic="ace2mqtt/control/solar_mode", payload=b"green", retain=False)
+        with patch("app.run_alfen"):
+            app.on_message(client, CFG, message)
+        client.publish.assert_called_once_with("ace2mqtt/state/solar_mode", "green", qos=1, retain=True)
+
     def test_invalid_topic_prefix_is_rejected(self):
         bad_cfg = {**CFG, "mqtt_topic_prefix": "bad/+"}
         with self.assertRaises(ValueError):
@@ -100,22 +117,39 @@ class DiscoveryTests(unittest.TestCase):
     def test_control_discovery_creates_four_buttons(self):
         client = Mock()
         app.publish_control_discovery(client, CFG, "ace2mqtt_192_0_2_10", {"identifiers": ["x"]})
-        self.assertEqual(client.publish.call_count, 5)
+        self.assertEqual(client.publish.call_count, 6)
         first = client.publish.call_args_list[0].args
         data = json.loads(first[1])
         self.assertEqual(first[0], "homeassistant/button/ace2mqtt_192_0_2_10/socket_enable/config")
         self.assertEqual(data["command_topic"], "ace2mqtt/control/socket_enable")
         self.assertEqual(data["payload_press"], "PRESS")
-        number_config = json.loads(client.publish.call_args_list[-1].args[1])
+        number_config = json.loads(client.publish.call_args_list[-2].args[1])
         self.assertEqual(number_config["command_topic"], "ace2mqtt/control/current")
         self.assertEqual(number_config["state_topic"], "ace2mqtt/state/current_limit")
         self.assertEqual(number_config["min"], 6)
         self.assertFalse(number_config["optimistic"])
+        select_config = json.loads(client.publish.call_args_list[-1].args[1])
+        self.assertEqual(client.publish.call_args_list[-1].args[0],
+                         "homeassistant/select/ace2mqtt_192_0_2_10/solar_mode/config")
+        self.assertEqual(select_config["options"], ["comfort", "green"])
+        self.assertEqual(select_config["state_topic"], "ace2mqtt/state/solar_mode")
 
     def test_current_readback_parses_selected_socket_only(self):
         text = "Charging current limits:\n  Socket 1 maximum 16 A\n  Socket 2 maximum 8 A\n"
         self.assertEqual(app.parse_current_limit(text, 2), "8")
         self.assertIsNone(app.parse_current_limit(text, 3))
+
+    def test_solar_mode_readback_accepts_only_known_modes(self):
+        self.assertEqual(app.parse_solar_mode("Load balancing:\n  Solar charging     comfort\n"), "comfort")
+        self.assertEqual(app.parse_solar_mode("  Solar charging green  \n"), "green")
+        self.assertIsNone(app.parse_solar_mode("Solar charging disabled"))
+
+    def test_solar_mode_readback_publishes_reported_value(self):
+        client = Mock()
+        with patch("app.run_alfen", return_value="Solar charging     comfort\n") as run:
+            self.assertTrue(app.publish_solar_mode_readback(client, CFG))
+        run.assert_called_once_with(CFG, "lb", timeout=20)
+        client.publish.assert_called_once_with("ace2mqtt/state/solar_mode", "comfort", qos=1, retain=True)
 
     def test_flatten_skips_non_finite_numbers(self):
         self.assertEqual(app.flatten({"socket": {"amps": 12.5, "unknown": float("nan")}, "active": True}),

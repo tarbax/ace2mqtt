@@ -102,6 +102,21 @@ def publish_control_discovery(client, cfg, device_id, device):
               "availability_topic": f"{root}/availability", "payload_available": "online",
               "payload_not_available": "offline"}
     client.publish(number_topic, json.dumps(number, ensure_ascii=False), qos=1, retain=True)
+    solar_topic = f"{cfg['discovery_prefix'].strip('/')}/select/{device_id}/solar_mode/config"
+    solar_select = {
+        "name": "Laadmodus",
+        "unique_id": f"{device_id}_solar_mode",
+        "command_topic": f"{root}/control/solar_mode",
+        "state_topic": f"{root}/state/solar_mode",
+        "options": ["comfort", "green"],
+        "optimistic": False,
+        "retain": False,
+        "device": device,
+        "availability_topic": f"{root}/availability",
+        "payload_available": "online",
+        "payload_not_available": "offline",
+    }
+    client.publish(solar_topic, json.dumps(solar_select, ensure_ascii=False), qos=1, retain=True)
 
 def handle_command(cfg, topic, payload, retained=False):
     """Translate a small fixed command set to alfenctl; never accept shell text."""
@@ -141,11 +156,19 @@ def handle_command(cfg, topic, payload, retained=False):
         run_alfen(cfg, "current", "set", str(amps), "--socket", socket)
         LOG.info("Laadstroominstelling voor socket %s bijgewerkt", socket)
         return str(amps)
+    if topic == f"{root}/control/solar_mode":
+        mode = payload.strip().lower()
+        if mode not in ("comfort", "green"):
+            LOG.warning("Ongeldige laadmodus ontvangen; toegestaan: comfort of green")
+            return
+        run_alfen(cfg, "lb", "set", "--solar-mode", mode)
+        LOG.info("Alfen-laadmodus ingesteld op %s", mode)
+        return mode
     LOG.debug("Onbekend MQTT-commando genegeerd")
 
 def subscribe_commands(client, cfg):
     root = cfg["mqtt_topic_prefix"].strip("/")
-    for name in ("socket_enable", "socket_disable", "direct_start_on", "direct_start_off", "current"):
+    for name in ("socket_enable", "socket_disable", "direct_start_on", "direct_start_off", "current", "solar_mode"):
         client.subscribe(f"{root}/control/{name}", qos=1)
 
 def mqtt_connected(client, cfg):
@@ -157,7 +180,8 @@ def on_message(client, cfg, message):
         current_value = handle_command(cfg, message.topic, payload, message.retain)
         if current_value is not None:
             root = cfg["mqtt_topic_prefix"].strip("/")
-            client.publish(f"{root}/state/current_limit", current_value, qos=1, retain=True)
+            state_name = "solar_mode" if message.topic == f"{root}/control/solar_mode" else "current_limit"
+            client.publish(f"{root}/state/{state_name}", current_value, qos=1, retain=True)
     except Exception as exc:
         LOG.error("Bedieningscommando mislukt: %s", exc)
 
@@ -239,6 +263,26 @@ def publish_current_readback(client, cfg):
         LOG.warning("Laadstroom teruglezen mislukt: %s", exc)
         return False
 
+def parse_solar_mode(output):
+    """Read the reported solar charging mode from alfenctl lb output."""
+    match = re.search(r"^\s*Solar charging\s+(comfort|green)\s*$", output, re.MULTILINE | re.IGNORECASE)
+    return match.group(1).lower() if match else None
+
+def publish_solar_mode_readback(client, cfg):
+    try:
+        with ALFEN_LOCK:
+            output = run_alfen(cfg, "lb", timeout=20)
+            mode = parse_solar_mode(output)
+            if mode is None:
+                LOG.warning("Kon de laadmodus niet uit alfenctl lezen")
+                return False
+            root = cfg["mqtt_topic_prefix"].strip("/")
+            client.publish(f"{root}/state/solar_mode", mode, qos=1, retain=True)
+            return True
+    except Exception as exc:
+        LOG.warning("Laadmodus teruglezen mislukt: %s", exc)
+        return False
+
 def main():
     cfg = options()
     validate_options(cfg)
@@ -248,12 +292,15 @@ def main():
         try:
             client = connect_mqtt(cfg)
             current_readback_published = False
+            solar_mode_readback_published = False
             LOG.info("Verbonden met MQTT; Alfen status wordt opgehaald van %s", cfg["charger_host"])
             while True:
                 status = run_status(cfg)
                 publish_discovery(client, cfg, status)
                 if not current_readback_published:
                     current_readback_published = publish_current_readback(client, cfg)
+                if not solar_mode_readback_published:
+                    solar_mode_readback_published = publish_solar_mode_readback(client, cfg)
                 client.publish(f"{cfg['mqtt_topic_prefix'].strip('/')}/availability", "online", qos=1, retain=True)
                 time.sleep(int(cfg["poll_interval"]))
         except KeyboardInterrupt:
