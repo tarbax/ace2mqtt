@@ -22,6 +22,7 @@ have the management API enabled.
 | `charger_http` | Use HTTP for older stations |
 | `socket_number` | Socket selected by control buttons and current command |
 | `current_min` / `current_max` | Locally allowed current range in A (1–80; defaults 6–32) |
+| `comfort_power_max_kw` | Upper limit for the Comfort power number in kW (1.35–22; default 4.0) |
 | `poll_interval` | Poll period in seconds (5–300) |
 | `mqtt_host`, `mqtt_port` | MQTT broker address |
 | `mqtt_username`, `mqtt_password` | Optional broker credentials |
@@ -43,8 +44,9 @@ the charger still applies its own limits. The command topic is never retained.
 The socket switch publishes `ON` or `OFF` to `.../control/socket`; the charging-
 profile override switch uses `.../control/charging_profile_override`. Their
 confirmed state is retained on the matching `.../state/` topics. Comfort power
-accepts 1.35–22.00 kW in 0.05 kW steps and writes Alfen
-property `3280_3` in watts; the charger's own supported range may be narrower.
+accepts 1.35 kW up to `comfort_power_max_kw` in 0.05 kW steps and writes Alfen
+property `3280_3` in watts. Set this option to the maximum supported by your
+charger; it defaults to 4 kW for this installation.
 The mode select publishes `comfort` or `green` to
 `.../control/solar_mode`. Retained control messages are ignored. The add-on does not expose
 firmware upgrades, factory reset, credential changes, network settings or

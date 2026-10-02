@@ -32,6 +32,10 @@ def options():
 def validate_options(cfg):
     if int(cfg["current_min"]) > int(cfg["current_max"]):
         raise ValueError("current_min moet kleiner dan of gelijk zijn aan current_max")
+    comfort_max = Decimal(str(cfg.get("comfort_power_max_kw", 4.0)))
+    if (not comfort_max.is_finite() or not Decimal("1.35") <= comfort_max <= Decimal("22.00")
+            or (comfort_max * 1000) % 50):
+        raise ValueError("comfort_power_max_kw moet tussen 1,35 en 22,00 kW liggen in stappen van 0,05")
     for key in ("mqtt_topic_prefix", "discovery_prefix"):
         value = str(cfg[key]).strip("/")
         if not value or any(char in value for char in ("+", "#", " ")):
@@ -120,7 +124,7 @@ def publish_control_discovery(client, cfg, device_id, device):
         "unique_id": f"{device_id}_comfort_power",
         "command_topic": f"{root}/control/comfort_power",
         "state_topic": f"{root}/state/comfort_power",
-        "min": 1.35, "max": 22.0, "step": 0.05,
+        "min": 1.35, "max": float(Decimal(str(cfg.get("comfort_power_max_kw", 4.0)))), "step": 0.05,
         "unit_of_measurement": "kW", "mode": "slider",
         "optimistic": False, "retain": False, "device": device,
         "availability_topic": f"{root}/availability",
@@ -205,8 +209,9 @@ def handle_command(cfg, topic, payload, retained=False):
         except (InvalidOperation, ValueError):
             LOG.warning("Ongeldig comfortvermogen ontvangen")
             return
-        if not kw.is_finite() or kw < Decimal("1.35") or kw > Decimal("22.00") or (kw * 1000) % 50:
-            LOG.warning("Comfortvermogen moet 1,35-22,00 kW zijn in stappen van 0,05 kW")
+        comfort_max = Decimal(str(cfg.get("comfort_power_max_kw", 4.0)))
+        if not kw.is_finite() or kw < Decimal("1.35") or kw > comfort_max or (kw * 1000) % 50:
+            LOG.warning("Comfortvermogen moet 1,35-%s kW zijn in stappen van 0,05 kW", comfort_max)
             return
         watts = int(kw * 1000)
         run_alfen(cfg, "set", "3280_3", str(watts))
