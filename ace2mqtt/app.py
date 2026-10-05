@@ -553,12 +553,28 @@ def publish_comfort_power_readback(client, cfg):
         return False
 
 def parse_green_share(output):
-    """Read the Alfen solar green-share property as an integer percentage."""
-    match = re.search(r"(?<![\w])3280_2\b[^=\n]*=\s*(\d{1,3})(?:\s*%)?\s*$", output, re.MULTILINE | re.IGNORECASE)
-    if not match:
-        return None
-    value = int(match.group(1))
-    return str(value) if 0 <= value <= 100 else None
+    """Read the Alfen green-share value from its get table or set output."""
+    for line in output.splitlines():
+        if not re.match(r"^\s*3280_2\b", line):
+            continue
+        if "=" in line:
+            value_columns = line.split("=", 1)[1].strip().split()
+            if not value_columns:
+                continue
+            raw_value = value_columns[0].rstrip("%")
+        else:
+            columns = line.split()
+            # alfenctl get prints ID, NAME, VALUE, ACCESS, then TITLE.
+            if len(columns) < 4:
+                continue
+            raw_value = columns[2]
+        try:
+            value = Decimal(raw_value)
+        except InvalidOperation:
+            continue
+        if value.is_finite() and value == value.to_integral_value() and 0 <= value <= 100:
+            return str(int(value))
+    return None
 
 def publish_green_share_readback(client, cfg):
     try:
