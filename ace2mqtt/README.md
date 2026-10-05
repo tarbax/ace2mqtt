@@ -43,7 +43,9 @@ selected socket and charging-profile override, and a sensor for
 the latest RFID ID recorded in a charging transaction. Turning the
 socket switch off may stop an active charging session.
 
-The RFID sensor is updated when the selected socket reports an authorized card
+Alongside **Laatste RFID-ID**, the **RFID-ID** sensor briefly publishes the
+same ID and clears its retained MQTT state after two seconds. The persistent
+sensor keeps the last ID. Both update when the selected socket reports an authorized card
 and Alfen has recorded its transaction. Rejected card scans do not expose a card
 ID through the status interface and therefore cannot be reported by this sensor.
 

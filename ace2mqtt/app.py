@@ -17,6 +17,8 @@ import requests
 LOG = logging.getLogger("ace2mqtt")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 ALFEN_LOCK = threading.RLock()
+RFID_PULSE_LOCK = threading.Lock()
+RFID_PULSE_TIMERS = {}
 EVCC_RETRY_DELAYS = (1, 3, 5)
 
 def clean_id(value):
@@ -147,6 +149,17 @@ def publish_control_discovery(client, cfg, device_id, device):
         "payload_available": "online", "payload_not_available": "offline",
     }
     client.publish(rfid_topic, json.dumps(rfid_sensor, ensure_ascii=False), qos=1, retain=True)
+    rfid_pulse_topic = f"{discovery_prefix}/sensor/{device_id}/rfid_id_pulse/config"
+    rfid_pulse_sensor = {
+        "name": "RFID-ID",
+        "unique_id": f"{device_id}_rfid_id_pulse",
+        "state_topic": f"{root}/state/rfid_id_pulse",
+        "icon": "mdi:card-account-details-outline",
+        "device": device,
+        "availability_topic": f"{root}/availability",
+        "payload_available": "online", "payload_not_available": "offline",
+    }
+    client.publish(rfid_pulse_topic, json.dumps(rfid_pulse_sensor, ensure_ascii=False), qos=1, retain=True)
     number_topic = f"{cfg['discovery_prefix'].strip('/')}/number/{device_id}/current_limit/config"
     current_min, current_max = effective_current_bounds(cfg)
     number = {"name": f"Laadstroom socket {socket}", "unique_id": f"{device_id}_current_limit",
@@ -471,6 +484,28 @@ def parse_latest_rfid_id(output, socket_number):
             return tag.strip()
     return None
 
+def _clear_rfid_id_pulse(client, state_topic, timer):
+    with RFID_PULSE_LOCK:
+        active = RFID_PULSE_TIMERS.get(state_topic)
+        if active is None or active[0] is not timer:
+            return
+        del RFID_PULSE_TIMERS[state_topic]
+        client.publish(state_topic, "", qos=1, retain=True)
+
+def publish_rfid_id_pulse(client, cfg, tag):
+    """Publish a short-lived RFID ID and clear it two seconds later."""
+    state_topic = f"{cfg['mqtt_topic_prefix'].strip('/')}/state/rfid_id_pulse"
+    with RFID_PULSE_LOCK:
+        previous = RFID_PULSE_TIMERS.pop(state_topic, None)
+        if previous is not None:
+            previous[1].cancel()
+        client.publish(state_topic, tag, qos=1, retain=True)
+        token = object()
+        timer = threading.Timer(2.0, _clear_rfid_id_pulse, args=(client, state_topic, token))
+        timer.daemon = True
+        RFID_PULSE_TIMERS[state_topic] = (token, timer)
+        timer.start()
+
 def normalise_uid(value):
     """Remove UID separators and standardise hexadecimal identifiers."""
     return re.sub(r"[^A-Za-z0-9]", "", str(value)).upper()
@@ -533,6 +568,7 @@ def publish_latest_rfid_id(client, cfg):
         return False
     root = cfg["mqtt_topic_prefix"].strip("/")
     client.publish(f"{root}/state/rfid_id", tag, qos=1, retain=True)
+    publish_rfid_id_pulse(client, cfg, tag)
     LOG.info("RFID-ID van de geautoriseerde laadpas gepubliceerd")
     assign_evcc_vehicle(cfg, tag)
     return True
