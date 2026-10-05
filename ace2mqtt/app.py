@@ -170,6 +170,19 @@ def publish_control_discovery(client, cfg, device_id, device):
         "payload_available": "online", "payload_not_available": "offline",
     }
     client.publish(comfort_topic, json.dumps(comfort_number, ensure_ascii=False), qos=1, retain=True)
+    green_share_topic = f"{cfg['discovery_prefix'].strip('/')}/number/{device_id}/green_share/config"
+    green_share_number = {
+        "name": "Green share",
+        "unique_id": f"{device_id}_green_share",
+        "command_topic": f"{root}/control/green_share",
+        "state_topic": f"{root}/state/green_share",
+        "min": 0, "max": 100, "step": 1,
+        "unit_of_measurement": "%", "mode": "slider",
+        "optimistic": False, "retain": False, "device": device,
+        "availability_topic": f"{root}/availability",
+        "payload_available": "online", "payload_not_available": "offline",
+    }
+    client.publish(green_share_topic, json.dumps(green_share_number, ensure_ascii=False), qos=1, retain=True)
     solar_topic = f"{cfg['discovery_prefix'].strip('/')}/select/{device_id}/solar_mode/config"
     solar_select = {
         "name": "Laadmodus",
@@ -257,6 +270,19 @@ def handle_command(cfg, topic, payload, retained=False):
         run_alfen(cfg, "set", "3280_3", str(watts))
         LOG.info("Comfortvermogen ingesteld op %s kW", kw)
         return format(kw.normalize(), "f")
+    if topic == f"{root}/control/green_share":
+        try:
+            percent = Decimal(payload.strip())
+        except (InvalidOperation, ValueError):
+            LOG.warning("Ongeldig green-sharepercentage ontvangen")
+            return
+        if not percent.is_finite() or percent < 0 or percent > 100 or not percent == percent.to_integral_value():
+            LOG.warning("Green share moet een geheel percentage van 0 tot 100 zijn")
+            return
+        value = int(percent)
+        run_alfen(cfg, "lb", "set", "--green-share", str(value))
+        LOG.info("Green share ingesteld op %s%%", value)
+        return str(value)
     if topic == f"{root}/control/solar_mode":
         mode = payload.strip().lower()
         if mode not in ("comfort", "green"):
@@ -269,7 +295,7 @@ def handle_command(cfg, topic, payload, retained=False):
 
 def subscribe_commands(client, cfg):
     root = cfg["mqtt_topic_prefix"].strip("/")
-    for name in ("socket", "charging_profile_override", "socket_enable", "socket_disable", "direct_start_on", "direct_start_off", "current", "comfort_power", "solar_mode"):
+    for name in ("socket", "charging_profile_override", "socket_enable", "socket_disable", "direct_start_on", "direct_start_off", "current", "comfort_power", "green_share", "solar_mode"):
         client.subscribe(f"{root}/control/{name}", qos=1)
 
 def mqtt_connected(client, cfg):
@@ -285,6 +311,7 @@ def on_message(client, cfg, message):
                 f"{root}/control/solar_mode": "solar_mode",
                 f"{root}/control/current": "current_limit",
                 f"{root}/control/comfort_power": "comfort_power",
+                f"{root}/control/green_share": "green_share",
                 f"{root}/control/socket": "socket",
                 f"{root}/control/charging_profile_override": "charging_profile_override",
             }[message.topic]
@@ -525,6 +552,29 @@ def publish_comfort_power_readback(client, cfg):
         LOG.warning("Comfortvermogen teruglezen mislukt: %s", exc)
         return False
 
+def parse_green_share(output):
+    """Read the Alfen solar green-share property as an integer percentage."""
+    match = re.search(r"(?<![\w])3280_2\b[^=\n]*=\s*(\d{1,3})(?:\s*%)?\s*$", output, re.MULTILINE | re.IGNORECASE)
+    if not match:
+        return None
+    value = int(match.group(1))
+    return str(value) if 0 <= value <= 100 else None
+
+def publish_green_share_readback(client, cfg):
+    try:
+        with ALFEN_LOCK:
+            output = run_alfen(cfg, "get", "3280_2", timeout=20)
+            value = parse_green_share(output)
+            if value is None:
+                LOG.warning("Kon het green-sharepercentage niet uit alfenctl lezen")
+                return False
+            root = cfg["mqtt_topic_prefix"].strip("/")
+            client.publish(f"{root}/state/green_share", value, qos=1, retain=True)
+            return True
+    except Exception as exc:
+        LOG.warning("Green share teruglezen mislukt: %s", exc)
+        return False
+
 def main():
     cfg = options()
     validate_options(cfg)
@@ -536,6 +586,7 @@ def main():
             current_readback_published = False
             solar_mode_readback_published = False
             comfort_power_readback_published = False
+            green_share_readback_published = False
             rfid_authorization_handled = False
             rfid_readback_attempts = 0
             LOG.info("Verbonden met MQTT; Alfen status wordt opgehaald van %s", cfg["charger_host"])
@@ -555,6 +606,8 @@ def main():
                     solar_mode_readback_published = publish_solar_mode_readback(client, cfg)
                 if not comfort_power_readback_published:
                     comfort_power_readback_published = publish_comfort_power_readback(client, cfg)
+                if not green_share_readback_published:
+                    green_share_readback_published = publish_green_share_readback(client, cfg)
                 client.publish(f"{cfg['mqtt_topic_prefix'].strip('/')}/availability", "online", qos=1, retain=True)
                 time.sleep(int(cfg["poll_interval"]))
         except KeyboardInterrupt:

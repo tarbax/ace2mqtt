@@ -38,7 +38,8 @@ rounds floating-point sensor values to two decimals before publishing them and
 sets Home Assistant's suggested display precision to two decimals. It
 also creates Home Assistant MQTT numbers for socket current and Comfort charging
 power (kW), a select entity for the solar charging mode (**comfort** or **green**),
-switches for the selected socket and charging-profile override, and a sensor for
+an integer percentage slider for the solar **green share**, switches for the
+selected socket and charging-profile override, and a sensor for
 the latest RFID ID recorded in a charging transaction. Turning the
 socket switch off may stop an active charging session.
 
@@ -64,6 +65,8 @@ confirmed state is retained on the matching `.../state/` topics. Comfort power
 accepts 1.35 kW up to `comfort_power_max_kw` in 0.05 kW steps and writes Alfen
 property `3280_3` in watts. Set this option to the maximum supported by your
 charger; it defaults to 4 kW for this installation.
+Green share accepts whole percentages from 0 to 100 and writes Alfen property
+`3280_2`.
 The mode select publishes `comfort` or `green` to
 `.../control/solar_mode`. Retained control messages are ignored. The add-on does not expose
 firmware upgrades, factory reset, credential changes, network settings or
