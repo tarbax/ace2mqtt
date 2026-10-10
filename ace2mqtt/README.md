@@ -1,107 +1,73 @@
 # ace2mqtt
 
-Home Assistant add-on that reads an Alfen charging station using the upstream
-[`alfenctl`](https://github.com/pbasista/alfenctl) project and publishes the
-status through MQTT. MQTT entities are announced with Home Assistant
-MQTT Discovery. There is no web interface.
+`ace2mqtt` is a Home Assistant add-on for Alfen charging stations. It reads
+charger status and publishes it over MQTT with Home Assistant MQTT Discovery.
+It also offers a small set of charger controls and an optional RFID-to-evcc
+vehicle assignment. There is no web interface.
 
-## Installation
+## Install
 
 Add this repository to the Home Assistant Add-on Store, install **ace2mqtt**,
-fill in the charger and MQTT settings, then start the add-on. MQTT must be
-enabled on your broker. The charger must be reachable from Home Assistant and
-have the management API enabled.
+enter the charger and MQTT settings, and start the add-on. The charger must be
+reachable from Home Assistant, its management interface must be enabled, and
+an MQTT broker must be running.
 
-## Settings
+## Configure
 
-| Setting | Purpose |
-| --- | --- |
-| `charger_host` | IP address or hostname of the Alfen charger; a reserved IP is recommended |
-| `charger_port` | Alfen management port (normally 443) |
-| `charger_username` / `charger_password` | Charger login |
-| `charger_http` | Use HTTP for older stations |
-| `socket_number` | Socket selected by control buttons and current command |
-| `current_min` / `current_max` | Locally allowed current range in A (1–64; defaults 6–32); the live station maximum further caps the slider and accepted commands |
-| `comfort_power_max_kw` | Upper limit for the Comfort power number in kW (1.35–11; default 4.0) |
-| `poll_interval` | Delay between completed polls in seconds (5–300) |
-| `mqtt_host`, `mqtt_port` | MQTT broker address |
-| `mqtt_username`, `mqtt_password` | Optional broker credentials |
-| `mqtt_topic_prefix` | State and availability topic prefix |
-| `discovery_prefix` | Home Assistant Discovery prefix |
-| `evcc_base_url` | Optional evcc REST base URL, for example `http://evcc:7070`; leave blank to disable the bridge |
-| `evcc_loadpoint_id` | evcc loadpoint ID to assign a vehicle to (default `1`) |
-| `uid_vehicle_map` | JSON object mapping Alfen RFID UIDs to evcc vehicle `name` values, for example `{"04AABBCCDDEEFF":"bmwx130e"}` |
+Required settings are the charger host, username and password, plus the MQTT
+host. The defaults use port 443, socket 1, a 6–32 A control range, a 4 kW
+Comfort limit, a 10-second polling delay and the `ace2mqtt` MQTT prefix.
 
-The add-on publishes scalar fields returned by `alfenctl status --json` as
-retained MQTT state and creates a sensor or binary sensor for each field. It
-rounds floating-point sensor values to two decimals before publishing them and
-sets Home Assistant's suggested display precision to two decimals. It
-also creates Home Assistant MQTT numbers for socket current and Comfort charging
-power (kW), a select entity for the solar charging mode (**off**, **comfort** or **green**),
-an integer percentage slider for the solar **green share**, switches for the
-selected socket and charging-profile override, and a sensor for
-the latest RFID ID recorded in a charging transaction. Turning the
-socket switch off may stop an active charging session.
+To assign a vehicle in evcc, set `evcc_base_url`, `evcc_loadpoint_id`, and
+`uid_vehicle_map`. Map each Alfen RFID UID to the vehicle's **internal name**
+from evcc, not its display title. For example:
 
-Alongside **Laatste RFID-ID**, the **RFID-ID** sensor briefly publishes the
-same ID and clears its retained MQTT state after two seconds. The persistent
-sensor keeps the last ID. Both update when the selected socket reports an authorized card
-and Alfen has recorded its transaction. Rejected card scans do not expose a card
-ID through the status interface and therefore cannot be reported by this sensor.
+```yaml
+evcc_base_url: "http://evcc:7070"
+evcc_loadpoint_id: 1
+uid_vehicle_map: '{"04AABBCCDDEEFF":"vehicle_name"}'
+```
 
-When `evcc_base_url` and `uid_vehicle_map` are configured, the same authorized
-RFID ID is normalised (separators removed, uppercase) and matched against the
-map. A match assigns the mapped evcc vehicle to `evcc_loadpoint_id` through the
-evcc REST API. Configure the exact vehicle `name` from evcc, not its display
-title. Unknown IDs are ignored. The bridge does not clear the vehicle on
-disconnect; evcc's own loadpoint behavior remains in control. Leave
-`evcc_base_url` empty to keep the evcc integration disabled.
+Leave `evcc_base_url` empty to disable vehicle assignment.
 
-To set a socket's current limit, use the discovered number entity or publish
-an integer amp value to `ace2mqtt/control/current` (replace `ace2mqtt` with
-the configured topic prefix). Values outside `current_min` and `current_max` are rejected locally;
-the charger still applies its own limits. The command topic is never retained.
-The socket switch publishes `ON` or `OFF` to `.../control/socket`; the charging-
-profile override switch uses `.../control/charging_profile_override`. Their
-confirmed state is retained on the matching `.../state/` topics. Comfort power
-accepts 1.35 kW up to `comfort_power_max_kw` in 0.05 kW steps and writes Alfen
-property `3280_3` in watts. Set this option to the maximum supported by your
-charger; it defaults to 4 kW for this installation.
-Green share accepts whole percentages from 0 to 100 and writes Alfen property
-`3280_2`.
-The mode select publishes `off`, `comfort` or `green` to
-`.../control/solar_mode`, translated to alfenctl values `0`, `1` and `2` respectively.
-`off` disables solar charging mode; it does not disable the socket.
-Retained control messages are ignored. The add-on does not expose
-firmware upgrades, factory reset, credential changes, network settings or
-arbitrary property commands.
+## Entities and controls
 
-Direct start only overrides an installed charging profile; it does not itself
-initiate a charging session. The current controls the configured per-socket
-maximum and cannot exceed the configured local bounds.
+The add-on discovers charger status sensors, socket current and Comfort power
+numbers, Green share, the solar mode (`off`, `comfort`, `green`), socket and
+charging-profile switches, and RFID sensors. Control states are read back from
+the charger. Socket current and Comfort power are limited by the add-on's
+configured bounds.
 
-## License
+The optional evcc bridge looks up an authorized RFID in `uid_vehicle_map` and
+assigns the matching vehicle to the configured loadpoint. RFID is obtained from
+Alfen's transaction history after authorization; rejected scans and cards not
+recorded by the charger cannot be identified by this method. The short-lived
+`RFID-ID` sensor clears after two seconds; `Laatste RFID-ID` retains the last
+recorded card.
 
-This add-on's wrapper is provided under EUPL-1.2. It installs `alfenctl` from
-PyPI at image build time; `alfenctl` itself is separately licensed under
-EUPL-1.2. See its upstream repository for its full license and notices.
+Direct start overrides an installed charging profile; it does not start a
+charging session by itself. Turning the socket switch off can stop a session.
 
-### Readback and compatibility
+## Credits and license
 
-All six controls (socket, charging-profile override, current, comfort power,
-green share and solar mode) are read back after a successful command and on
-every poll. MQTT state reflects the reported value, including a clamped value,
-rather than echoing the requested value. Failed readback leaves the last known
-state and logs a warning. Each poll makes serialized CLI calls; `poll_interval`
-is the delay after those calls finish.
+This add-on is based on [`alfenctl`](https://github.com/pbasista/alfenctl),
+created by [Peter Basista](https://github.com/pbasista). `alfenctl` provides
+the Alfen charger communication and command-line interface used by this
+project. Many thanks to Peter for making that project available. `alfenctl`
+is installed separately from PyPI and is licensed under EUPL-1.2; see its
+repository for its source and license notices. The `ace2mqtt` add-on wrapper
+is also licensed under EUPL-1.2.
 
-The CLI contract is checked against `alfenctl==0.1.0`. Its comfort control accepts
-1350–11000 W; the add-on keeps its configured lower cap (default 4000 W) and
-50 W control steps. Readback also accepts valid existing values between steps.
-RFID is derived from transaction records on the selected socket, not raw card
-scans; rejected scans and authorizations missed between polls are not guaranteed.
+## Development
 
-Run local tests with `PYTHONPATH=ace2mqtt python3 -m unittest discover -s ace2mqtt/tests`.
-Install the pinned requirements to also run the upstream CLI contract tests;
-without alfenctl those tests are explicitly skipped. These tests use synthetic
-charger data and do not contact a charger, MQTT broker or evcc instance.
+Run the local tests from the repository root:
+
+```sh
+PYTHONPATH=ace2mqtt python3 -m unittest discover -s ace2mqtt/tests
+```
+
+Tests that check output and CLI compatibility against `alfenctl==0.1.0` are
+skipped unless the pinned package is installed. Local tests do not contact a
+charger, MQTT broker, Home Assistant or evcc instance. See
+[`docs/cli-audit.md`](docs/cli-audit.md) for the detailed CLI audit and known
+runtime boundaries.
