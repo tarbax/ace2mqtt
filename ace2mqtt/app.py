@@ -20,6 +20,8 @@ ALFEN_LOCK = threading.RLock()
 RFID_PULSE_LOCK = threading.Lock()
 RFID_PULSE_TIMERS = {}
 EVCC_RETRY_DELAYS = (1, 3, 5)
+# alfenctl 0.1.0 loadbalancing.SOLAR_MODES; --solar-mode expects an integer.
+SOLAR_MODE_VALUES = {"off": "0", "comfort": "1", "green": "2"}
 
 def clean_id(value):
     return re.sub(r"[^a-z0-9_]+", "_", value.lower()).strip("_") or "value"
@@ -35,12 +37,12 @@ def options():
     return cfg
 
 def validate_options(cfg):
-    if int(cfg["current_min"]) > int(cfg["current_max"]):
-        raise ValueError("current_min moet kleiner dan of gelijk zijn aan current_max")
+    if not 1 <= int(cfg["current_min"]) <= int(cfg["current_max"]) <= 64:
+        raise ValueError("Laadstroomgrenzen moeten 1 <= current_min <= current_max <= 64 A zijn")
     comfort_max = Decimal(str(cfg.get("comfort_power_max_kw", 4.0)))
-    if (not comfort_max.is_finite() or not Decimal("1.35") <= comfort_max <= Decimal("22.00")
+    if (not comfort_max.is_finite() or not Decimal("1.35") <= comfort_max <= Decimal("11.00")
             or (comfort_max * 1000) % 50):
-        raise ValueError("comfort_power_max_kw moet tussen 1,35 en 22,00 kW liggen in stappen van 0,05")
+        raise ValueError("comfort_power_max_kw moet tussen 1,35 en 11,00 kW liggen in stappen van 0,05")
     for key in ("mqtt_topic_prefix", "discovery_prefix"):
         value = str(cfg[key]).strip("/")
         if not value or any(char in value for char in ("+", "#", " ")):
@@ -89,6 +91,9 @@ def run_alfen(cfg, *args, timeout=30):
         result = subprocess.run(alfen_command(cfg, *args), capture_output=True, text=True, timeout=timeout)
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or f"alfenctl exited {result.returncode}")
+    for line in result.stderr.splitlines():
+        if line.lower().startswith("warning:"):
+            LOG.warning("alfenctl: %s", line.removeprefix("warning:").strip())
     return result.stdout
 
 def run_status(cfg):
@@ -116,7 +121,7 @@ def discovery_switch(client, cfg, device_id, device, key, name):
 def effective_current_bounds(cfg):
     """Apply the live station-wide current ceiling to the configured bounds."""
     local_min = int(cfg["current_min"])
-    effective_max = int(cfg["current_max"])
+    effective_max = min(64, int(cfg["current_max"]))
     try:
         station_limit = float(cfg.get("_station_max_current_a"))
     except (TypeError, ValueError):
@@ -202,7 +207,7 @@ def publish_control_discovery(client, cfg, device_id, device):
         "unique_id": f"{device_id}_solar_mode",
         "command_topic": f"{root}/control/solar_mode",
         "state_topic": f"{root}/state/solar_mode",
-        "options": ["comfort", "green"],
+        "options": list(SOLAR_MODE_VALUES),
         "optimistic": False,
         "retain": False,
         "device": device,
@@ -262,7 +267,8 @@ def handle_command(cfg, topic, payload, retained=False):
             LOG.warning("Laadstroom moet een geheel aantal ampere zijn")
             return
         amps = int(numeric_amps)
-        current_min, current_max = effective_current_bounds(cfg)
+        _, current_max = effective_current_bounds(cfg)
+        current_min = max(1, int(cfg["current_min"]))
         if not current_min <= amps <= current_max:
             LOG.warning("Laadstroom buiten ingestelde grens (%s-%s A)", current_min, current_max)
             return
@@ -280,7 +286,7 @@ def handle_command(cfg, topic, payload, retained=False):
             LOG.warning("Comfortvermogen moet 1,35-%s kW zijn in stappen van 0,05 kW", comfort_max)
             return
         watts = int(kw * 1000)
-        run_alfen(cfg, "set", "3280_3", str(watts))
+        run_alfen(cfg, "lb", "set", "--comfort-level", str(watts))
         LOG.info("Comfortvermogen ingesteld op %s kW", kw)
         return format(kw.normalize(), "f")
     if topic == f"{root}/control/green_share":
@@ -298,10 +304,10 @@ def handle_command(cfg, topic, payload, retained=False):
         return str(value)
     if topic == f"{root}/control/solar_mode":
         mode = payload.strip().lower()
-        if mode not in ("comfort", "green"):
-            LOG.warning("Ongeldige laadmodus ontvangen; toegestaan: comfort of green")
+        if mode not in SOLAR_MODE_VALUES:
+            LOG.warning("Ongeldige laadmodus ontvangen; toegestaan: off, comfort of green")
             return
-        run_alfen(cfg, "lb", "set", "--solar-mode", mode)
+        run_alfen(cfg, "lb", "set", "--solar-mode", SOLAR_MODE_VALUES[mode])
         LOG.info("Alfen-laadmodus ingesteld op %s", mode)
         return mode
     LOG.debug("Onbekend MQTT-commando genegeerd")
@@ -317,18 +323,26 @@ def mqtt_connected(client, cfg):
 def on_message(client, cfg, message):
     try:
         payload = message.payload.decode("utf-8", errors="replace")
-        current_value = handle_command(cfg, message.topic, payload, message.retain)
-        if current_value is not None:
+        # Keep command and actual readback ordered against polling and other writes.
+        with ALFEN_LOCK:
+            value = handle_command(cfg, message.topic, payload, message.retain)
             root = cfg["mqtt_topic_prefix"].strip("/")
-            state_name = {
-                f"{root}/control/solar_mode": "solar_mode",
-                f"{root}/control/current": "current_limit",
-                f"{root}/control/comfort_power": "comfort_power",
-                f"{root}/control/green_share": "green_share",
-                f"{root}/control/socket": "socket",
-                f"{root}/control/charging_profile_override": "charging_profile_override",
-            }[message.topic]
-            client.publish(f"{root}/state/{state_name}", current_value, qos=1, retain=True)
+            name = message.topic.removeprefix(f"{root}/control/")
+            readers = {
+                "solar_mode": publish_solar_mode_readback,
+                "current": publish_current_readback,
+                "comfort_power": publish_comfort_power_readback,
+                "green_share": publish_green_share_readback,
+                "socket": publish_socket_readback,
+                "charging_profile_override": publish_override_readback,
+            }
+            if value is not None:
+                readers[name](client, cfg)
+            elif not message.retain and payload == "PRESS":
+                if name in ("socket_enable", "socket_disable"):
+                    publish_socket_readback(client, cfg)
+                elif name in ("direct_start_on", "direct_start_off"):
+                    publish_override_readback(client, cfg)
     except Exception as exc:
         LOG.error("Bedieningscommando mislukt: %s", exc)
 
@@ -428,7 +442,7 @@ def publish_current_readback(client, cfg):
 
 def parse_solar_mode(output):
     """Read the reported solar charging mode from alfenctl lb output."""
-    match = re.search(r"^\s*Solar charging\s+(comfort|green)\s*$", output, re.MULTILINE | re.IGNORECASE)
+    match = re.search(r"^\s*Solar charging\s+(off|comfort|green)\s*$", output, re.MULTILINE | re.IGNORECASE)
     return match.group(1).lower() if match else None
 
 def publish_solar_mode_readback(client, cfg):
@@ -446,15 +460,61 @@ def publish_solar_mode_readback(client, cfg):
         LOG.warning("Laadmodus teruglezen mislukt: %s", exc)
         return False
 
+def parse_property_number(output, property_id):
+    """Read only the requested property's value, never numbers in metadata."""
+    for line in output.splitlines():
+        if not re.match(rf"^\s*{re.escape(property_id)}\b", line):
+            continue
+        columns = line.split("=", 1)[1].split() if "=" in line else line.split()[2:]
+        if not columns:
+            continue
+        try:
+            value = Decimal(columns[0].rstrip("%"))
+        except InvalidOperation:
+            continue
+        if value.is_finite():
+            return value
+    return None
+
+
 def parse_comfort_power(output):
-    """Read the comfort level property, reported by alfenctl in watts."""
-    match = re.search(r"(?<![\w])(\d{4,5})(?![\w])", output)
-    if not match:
+    """Read the comfort level property in watts from the get table."""
+    watts = parse_property_number(output, "3280_3")
+    if watts is None or not 1350 <= watts <= 11000:
         return None
-    watts = int(match.group(1))
-    if watts < 1350 or watts > 22000 or watts % 50:
-        return None
-    return format(Decimal(watts) / 1000, "f")
+    return format((watts / 1000).normalize(), "f")
+
+
+def parse_socket_state(output, socket_number, override=False):
+    labels = ({"follow profile": "OFF", "direct start (override the profile)": "ON"}
+              if override else {"in service": "ON", "out of service": "OFF"})
+    match = re.search(rf"^\s*Socket\s+{int(socket_number)}\s+(.+?)\s*$", output, re.MULTILINE)
+    return labels.get(match.group(1)) if match else None
+
+
+def publish_switch_readback(client, cfg, override=False):
+    name = "charging_profile_override" if override else "socket"
+    command = ("direct-start", "show") if override else ("socket", "show", str(cfg["socket_number"]))
+    try:
+        with ALFEN_LOCK:
+            value = parse_socket_state(run_alfen(cfg, *command, timeout=20), cfg["socket_number"], override)
+            if value is None:
+                LOG.warning("Kon %s niet uit alfenctl lezen", name)
+                return False
+            client.publish(f"{cfg['mqtt_topic_prefix'].strip('/')}/state/{name}", value, qos=1, retain=True)
+            return True
+    except Exception as exc:
+        LOG.warning("%s teruglezen mislukt: %s", name, exc)
+        return False
+
+
+def publish_socket_readback(client, cfg):
+    return publish_switch_readback(client, cfg)
+
+
+def publish_override_readback(client, cfg):
+    return publish_switch_readback(client, cfg, override=True)
+
 
 def needs_rfid_readback(status, socket_number):
     """Whether the selected socket currently reports a card authorization."""
@@ -590,27 +650,11 @@ def publish_comfort_power_readback(client, cfg):
 
 def parse_green_share(output):
     """Read the Alfen green-share value from its get table or set output."""
-    for line in output.splitlines():
-        if not re.match(r"^\s*3280_2\b", line):
-            continue
-        if "=" in line:
-            value_columns = line.split("=", 1)[1].strip().split()
-            if not value_columns:
-                continue
-            raw_value = value_columns[0].rstrip("%")
-        else:
-            columns = line.split()
-            # alfenctl get prints ID, NAME, VALUE, ACCESS, then TITLE.
-            if len(columns) < 4:
-                continue
-            raw_value = columns[2]
-        try:
-            value = Decimal(raw_value)
-        except InvalidOperation:
-            continue
-        if value.is_finite() and value == value.to_integral_value() and 0 <= value <= 100:
-            return str(int(value))
+    value = parse_property_number(output, "3280_2")
+    if value is not None and value == value.to_integral_value() and 0 <= value <= 100:
+        return str(int(value))
     return None
+
 
 def publish_green_share_readback(client, cfg):
     try:
@@ -635,10 +679,6 @@ def main():
         client = None
         try:
             client = connect_mqtt(cfg)
-            current_readback_published = False
-            solar_mode_readback_published = False
-            comfort_power_readback_published = False
-            green_share_readback_published = False
             rfid_authorization_handled = False
             rfid_readback_attempts = 0
             LOG.info("Verbonden met MQTT; Alfen status wordt opgehaald van %s", cfg["charger_host"])
@@ -652,14 +692,12 @@ def main():
                 elif not rfid_authorization_active:
                     rfid_authorization_handled = False
                     rfid_readback_attempts = 0
-                if not current_readback_published:
-                    current_readback_published = publish_current_readback(client, cfg)
-                if not solar_mode_readback_published:
-                    solar_mode_readback_published = publish_solar_mode_readback(client, cfg)
-                if not comfort_power_readback_published:
-                    comfort_power_readback_published = publish_comfort_power_readback(client, cfg)
-                if not green_share_readback_published:
-                    green_share_readback_published = publish_green_share_readback(client, cfg)
+                publish_current_readback(client, cfg)
+                publish_solar_mode_readback(client, cfg)
+                publish_comfort_power_readback(client, cfg)
+                publish_green_share_readback(client, cfg)
+                publish_socket_readback(client, cfg)
+                publish_override_readback(client, cfg)
                 client.publish(f"{cfg['mqtt_topic_prefix'].strip('/')}/availability", "online", qos=1, retain=True)
                 time.sleep(int(cfg["poll_interval"]))
         except KeyboardInterrupt:

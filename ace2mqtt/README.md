@@ -21,9 +21,9 @@ have the management API enabled.
 | `charger_username` / `charger_password` | Charger login |
 | `charger_http` | Use HTTP for older stations |
 | `socket_number` | Socket selected by control buttons and current command |
-| `current_min` / `current_max` | Locally allowed current range in A (1–80; defaults 6–32); the live station maximum further caps the slider and accepted commands |
-| `comfort_power_max_kw` | Upper limit for the Comfort power number in kW (1.35–22; default 4.0) |
-| `poll_interval` | Poll period in seconds (5–300) |
+| `current_min` / `current_max` | Locally allowed current range in A (1–64; defaults 6–32); the live station maximum further caps the slider and accepted commands |
+| `comfort_power_max_kw` | Upper limit for the Comfort power number in kW (1.35–11; default 4.0) |
+| `poll_interval` | Delay between completed polls in seconds (5–300) |
 | `mqtt_host`, `mqtt_port` | MQTT broker address |
 | `mqtt_username`, `mqtt_password` | Optional broker credentials |
 | `mqtt_topic_prefix` | State and availability topic prefix |
@@ -37,7 +37,7 @@ retained MQTT state and creates a sensor or binary sensor for each field. It
 rounds floating-point sensor values to two decimals before publishing them and
 sets Home Assistant's suggested display precision to two decimals. It
 also creates Home Assistant MQTT numbers for socket current and Comfort charging
-power (kW), a select entity for the solar charging mode (**comfort** or **green**),
+power (kW), a select entity for the solar charging mode (**off**, **comfort** or **green**),
 an integer percentage slider for the solar **green share**, switches for the
 selected socket and charging-profile override, and a sensor for
 the latest RFID ID recorded in a charging transaction. Turning the
@@ -69,8 +69,10 @@ property `3280_3` in watts. Set this option to the maximum supported by your
 charger; it defaults to 4 kW for this installation.
 Green share accepts whole percentages from 0 to 100 and writes Alfen property
 `3280_2`.
-The mode select publishes `comfort` or `green` to
-`.../control/solar_mode`. Retained control messages are ignored. The add-on does not expose
+The mode select publishes `off`, `comfort` or `green` to
+`.../control/solar_mode`, translated to alfenctl values `0`, `1` and `2` respectively.
+`off` disables solar charging mode; it does not disable the socket.
+Retained control messages are ignored. The add-on does not expose
 firmware upgrades, factory reset, credential changes, network settings or
 arbitrary property commands.
 
@@ -83,3 +85,23 @@ maximum and cannot exceed the configured local bounds.
 This add-on's wrapper is provided under EUPL-1.2. It installs `alfenctl` from
 PyPI at image build time; `alfenctl` itself is separately licensed under
 EUPL-1.2. See its upstream repository for its full license and notices.
+
+### Readback and compatibility
+
+All six controls (socket, charging-profile override, current, comfort power,
+green share and solar mode) are read back after a successful command and on
+every poll. MQTT state reflects the reported value, including a clamped value,
+rather than echoing the requested value. Failed readback leaves the last known
+state and logs a warning. Each poll makes serialized CLI calls; `poll_interval`
+is the delay after those calls finish.
+
+The CLI contract is checked against `alfenctl==0.1.0`. Its comfort control accepts
+1350–11000 W; the add-on keeps its configured lower cap (default 4000 W) and
+50 W control steps. Readback also accepts valid existing values between steps.
+RFID is derived from transaction records on the selected socket, not raw card
+scans; rejected scans and authorizations missed between polls are not guaranteed.
+
+Run local tests with `PYTHONPATH=ace2mqtt python3 -m unittest discover -s ace2mqtt/tests`.
+Install the pinned requirements to also run the upstream CLI contract tests;
+without alfenctl those tests are explicitly skipped. These tests use synthetic
+charger data and do not contact a charger, MQTT broker or evcc instance.
