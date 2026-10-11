@@ -8,6 +8,7 @@ import re
 import subprocess
 import threading
 import time
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from urllib.parse import quote
 
@@ -20,6 +21,7 @@ ALFEN_LOCK = threading.RLock()
 RFID_PULSE_LOCK = threading.Lock()
 RFID_PULSE_TIMERS = {}
 EVCC_RETRY_DELAYS = (1, 3, 5)
+RFID_SEARCH_SECONDS = 180
 # alfenctl 0.1.0 loadbalancing.SOLAR_MODES; --solar-mode expects an integer.
 SOLAR_MODE_VALUES = {"off": "0", "comfort": "1", "green": "2"}
 
@@ -527,6 +529,58 @@ def needs_rfid_readback(status, socket_number):
             return True
     return False
 
+def socket_has_vehicle(status, socket_number):
+    """Recognise a new plug-in even when the short NFC state was missed."""
+    sockets = status.get("sockets", []) if isinstance(status, dict) else []
+    for socket in sockets:
+        if not isinstance(socket, dict) or int(socket.get("socket", 0)) != int(socket_number):
+            continue
+        mode3 = str(socket.get("mode3", "")).strip().upper()
+        if mode3:
+            return mode3[0] in "BCD"
+        states = {str(socket.get(key, "")).strip().lower() for key in ("state", "display")}
+        return bool(states & {"nfc authorised", "nfc authorized", "authorised", "authorized",
+                              "charging power on", "vehicle connected"})
+    return False
+
+def transaction_records(output, socket_number):
+    try:
+        records = json.loads(output)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(records, list):
+        return []
+    return [record for record in records if isinstance(record, dict)
+            and record.get("socket") == int(socket_number)]
+
+def latest_transaction_offset(output, socket_number):
+    offsets = [record.get("offset") for record in transaction_records(output, socket_number)]
+    return max((value for value in offsets if isinstance(value, int)), default=None)
+
+def session_rfid_id(output, socket_number, connected_at, baseline_offset):
+    """Select only a card recorded for this plug-in, never yesterday's latest card."""
+    for record in reversed(transaction_records(output, socket_number)):
+        tag = record.get("start_tag")
+        if not isinstance(tag, str) or not tag.strip():
+            continue
+        offset = record.get("offset")
+        if baseline_offset is not None and (not isinstance(offset, int) or offset <= baseline_offset):
+            continue
+        raw_time = record.get("start_time")
+        if raw_time:
+            try:
+                started = datetime.fromisoformat(raw_time)
+                # Alfen's local timestamps may be naive while the add-on uses UTC.
+                # The transaction offset is the reliable boundary in that case.
+                if started.tzinfo is not None and started < connected_at - timedelta(seconds=90):
+                    continue
+            except (TypeError, ValueError):
+                continue
+        if baseline_offset is None and (not raw_time or started.tzinfo is None):
+            continue
+        return tag.strip()
+    return None
+
 def parse_latest_rfid_id(output, socket_number):
     """Read the latest authorized card ID recorded for the selected socket."""
     try:
@@ -613,13 +667,14 @@ def assign_evcc_vehicle(cfg, tag):
                 LOG.error("evcc-aanroep mislukt; retries opgebruikt: %s", exc)
     return False
 
-def publish_latest_rfid_id(client, cfg):
+def publish_latest_rfid_id(client, cfg, connected_at=None, baseline_offset=None):
     """Fetch and publish the latest card recorded on the selected socket."""
     try:
         with ALFEN_LOCK:
             output = run_alfen(cfg, "transactions", "--json", "--since", "today",
                                "--socket", str(cfg["socket_number"]), timeout=60)
-            tag = parse_latest_rfid_id(output, cfg["socket_number"])
+            tag = (session_rfid_id(output, cfg["socket_number"], connected_at, baseline_offset)
+                   if connected_at else parse_latest_rfid_id(output, cfg["socket_number"]))
     except Exception as exc:
         LOG.warning("RFID-ID uitlezen mislukt: %s", exc)
         return False
@@ -632,6 +687,18 @@ def publish_latest_rfid_id(client, cfg):
     LOG.info("RFID-ID van de geautoriseerde laadpas gepubliceerd")
     assign_evcc_vehicle(cfg, tag)
     return True
+
+def read_transaction_offset(cfg):
+    """Remember the last log record while unplugged for firmware without timestamps."""
+    try:
+        with ALFEN_LOCK:
+            output = run_alfen(cfg, "transactions", "--json", "--since", "today",
+                               "--socket", str(cfg["socket_number"]), timeout=60)
+        offset = latest_transaction_offset(output, cfg["socket_number"])
+        return offset if offset is not None else -1
+    except Exception as exc:
+        LOG.warning("RFID-transactiebasis uitlezen mislukt: %s", exc)
+        return None
 
 def publish_comfort_power_readback(client, cfg):
     try:
@@ -679,19 +746,30 @@ def main():
         client = None
         try:
             client = connect_mqtt(cfg)
-            rfid_authorization_handled = False
-            rfid_readback_attempts = 0
+            session_active = False
+            rfid_handled = False
+            rfid_deadline = 0
+            connected_at = None
+            baseline_offset = None
+            baseline_needed = True
             LOG.info("Verbonden met MQTT; Alfen status wordt opgehaald van %s", cfg["charger_host"])
             while True:
                 status = run_status(cfg)
                 publish_discovery(client, cfg, status)
-                rfid_authorization_active = needs_rfid_readback(status, cfg["socket_number"])
-                if rfid_authorization_active and not rfid_authorization_handled and rfid_readback_attempts < 2:
-                    rfid_authorization_handled = publish_latest_rfid_id(client, cfg)
-                    rfid_readback_attempts += 1
-                elif not rfid_authorization_active:
-                    rfid_authorization_handled = False
-                    rfid_readback_attempts = 0
+                active = socket_has_vehicle(status, cfg["socket_number"])
+                if active and not session_active:
+                    connected_at = datetime.now().astimezone()
+                    rfid_deadline = time.monotonic() + RFID_SEARCH_SECONDS
+                    rfid_handled = False
+                    baseline_needed = True
+                elif not active and session_active:
+                    baseline_needed = True
+                session_active = active
+                if active and not rfid_handled and time.monotonic() < rfid_deadline:
+                    rfid_handled = publish_latest_rfid_id(client, cfg, connected_at, baseline_offset)
+                elif not active and baseline_needed:
+                    baseline_offset = read_transaction_offset(cfg)
+                    baseline_needed = False
                 publish_current_readback(client, cfg)
                 publish_solar_mode_readback(client, cfg)
                 publish_comfort_power_readback(client, cfg)

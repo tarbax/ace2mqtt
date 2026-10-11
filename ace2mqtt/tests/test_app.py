@@ -3,6 +3,7 @@ import sys
 import types
 import tomllib
 import unittest
+from datetime import datetime, timedelta
 from unittest.mock import Mock, mock_open, patch
 
 # The runtime dependency is pinned in requirements.txt; keep unit tests runnable
@@ -183,6 +184,48 @@ class EvccBridgeTests(unittest.TestCase):
             "ace2mqtt/state/rfid_id", "04:AABBCCDDEEFF", qos=1, retain=True
         )
         assign.assert_called_once_with(CFG, "04:AABBCCDDEEFF")
+
+    def test_charging_transition_is_detected_without_visible_nfc_state(self):
+        idle = {"sockets": [{"socket": 2, "state": "available", "mode3": "A (no vehicle)"}]}
+        charging = {"sockets": [{"socket": 2, "state": "charging power on", "mode3": "C2 (charging)"}]}
+        self.assertFalse(app.socket_has_vehicle(idle, 2))
+        self.assertTrue(app.socket_has_vehicle(charging, 2))
+        self.assertFalse(app.needs_rfid_readback(charging, 2))
+
+    @patch("app.threading.Timer")
+    @patch("app.assign_evcc_vehicle")
+    @patch("app.run_alfen")
+    def test_new_session_ignores_old_card_and_waits_for_new_transaction(self, run, assign, timer):
+        connected = datetime.now().astimezone()
+        old = (connected - timedelta(hours=2)).isoformat()
+        new = (connected - timedelta(seconds=20)).isoformat()
+        run.side_effect = [json.dumps([{"socket": 2, "offset": 10, "start_time": old,
+                                        "start_tag": "old"}]),
+                           json.dumps([{"socket": 2, "offset": 10, "start_time": old,
+                                        "start_tag": "old"},
+                                       {"socket": 2, "offset": 11, "start_time": new,
+                                        "start_tag": "new"}])]
+        client = Mock()
+        self.assertFalse(app.publish_latest_rfid_id(client, CFG, connected, 10))
+        assign.assert_not_called()
+        self.assertTrue(app.publish_latest_rfid_id(client, CFG, connected, 10))
+        assign.assert_called_once_with(CFG, "new")
+
+    def test_missing_timestamp_requires_new_offset(self):
+        connected = datetime.now().astimezone()
+        records = json.dumps([{"socket": 2, "offset": 10, "start_tag": "old"},
+                              {"socket": 2, "offset": 11, "start_tag": "new"}])
+        self.assertEqual(app.latest_transaction_offset(records, 2), 11)
+        self.assertEqual(app.session_rfid_id(records, 2, connected, 10), "new")
+        self.assertIsNone(app.session_rfid_id(records, 2, connected, None))
+
+    def test_naive_charger_time_uses_offset_without_guessing_container_timezone(self):
+        connected = datetime.now().astimezone()
+        records = json.dumps([{"socket": 2, "offset": 42,
+                               "start_time": "2026-10-11T09:23:30", "start_tag": "new"}])
+        self.assertEqual(app.session_rfid_id(records, 2, connected, 41), "new")
+        self.assertIsNone(app.session_rfid_id(records, 2, connected, None))
+        self.assertEqual(app.latest_transaction_offset("[]", 2), None)
 
     def test_invalid_evcc_map_is_rejected(self):
         with self.assertRaises(ValueError):

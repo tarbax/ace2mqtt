@@ -45,6 +45,12 @@ recorded by the charger cannot be identified by this method. The short-lived
 `RFID-ID` sensor clears after two seconds; `Laatste RFID-ID` retains the last
 recorded card.
 
+The bridge also checks for a new transaction after a vehicle connects, since
+Alfen's short authorization state can fall between status polls. It checks for
+up to three minutes and only uses a transaction newer than the record seen
+while unplugged. If the add-on starts during an active session without such a
+baseline, it waits for a later session rather than assigning an old card.
+
 Direct start overrides an installed charging profile; it does not start a
 charging session by itself. Turning the socket switch off can stop a session.
 
