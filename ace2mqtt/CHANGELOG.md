@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0-beta.3
+
+- Options are grouped into `charger`, `mqtt`, `limits` and `evcc` sections. Existing flat configs are migrated automatically (legacy keys stay in the schema, empty, for now).
+- RFID cards are configured as a list (`evcc.vehicles`) instead of a JSON string.
+- Optional values (`mqtt.username`, `mqtt.password`, `evcc.url`, `evcc.password`, `charger.port`) are truly optional; `evcc.url` is validated as a URL and the charger port follows the HTTP setting.
+- New `log_level` option (debug logs every alfenctl call) and `solar_controls` switch to hide and skip Comfort power, Green share and Charging mode.
+- Option translations updated for the new layout.
+
 ## 0.2.0-beta.2
 
 - Documentation rewritten in English; log, error and entity texts are English too.

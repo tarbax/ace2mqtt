@@ -36,39 +36,134 @@ MAX_BACKOFF_SECONDS = 60
 def clean_id(value):
     return re.sub(r"[^a-z0-9_]+", "_", value.lower()).strip("_") or "value"
 
+# Flat internal option name -> (section, name) in the grouped add-on options.
+# The flat names are the ones the previous versions used, so they double as the
+# legacy keys that are still accepted (and migrated) at startup.
+NESTED = {
+    "charger_host": ("charger", "host"), "charger_port": ("charger", "port"),
+    "charger_username": ("charger", "username"), "charger_password": ("charger", "password"),
+    "charger_http": ("charger", "http"), "socket_number": ("charger", "socket"),
+    "mqtt_host": ("mqtt", "host"), "mqtt_port": ("mqtt", "port"),
+    "mqtt_username": ("mqtt", "username"), "mqtt_password": ("mqtt", "password"),
+    "mqtt_topic_prefix": ("mqtt", "topic_prefix"), "discovery_prefix": ("mqtt", "discovery_prefix"),
+    "current_min": ("limits", "current_min"), "current_max": ("limits", "current_max"),
+    "comfort_power_max_kw": ("limits", "comfort_power_max_kw"), "poll_interval": ("limits", "poll_interval"),
+    "evcc_base_url": ("evcc", "url"), "evcc_loadpoint_id": ("evcc", "loadpoint"),
+    "evcc_password": ("evcc", "password"),
+}
+LEGACY_KEYS = (*NESTED, "uid_vehicle_map")
+OPTIONAL_KEYS = ("charger_port", "mqtt_username", "mqtt_password", "evcc_base_url", "evcc_password")
+DEFAULTS = {
+    "charger_username": "admin", "charger_password": "", "charger_http": False, "socket_number": 1,
+    "mqtt_host": "core-mosquitto", "mqtt_port": 1883, "mqtt_username": "", "mqtt_password": "",
+    "mqtt_topic_prefix": "ace2mqtt", "discovery_prefix": "homeassistant",
+    "current_min": 6, "current_max": 32, "comfort_power_max_kw": 4.0, "poll_interval": 10,
+    "evcc_base_url": "", "evcc_loadpoint_id": 1, "evcc_password": "",
+}
+
+def option_label(key):
+    section, name = NESTED.get(key, (None, key))
+    return f"{section}.{name}" if section else name
+
+def normalize_options(raw):
+    """Turn the grouped add-on options (or a pre-0.2 flat config) into the flat internal config.
+
+    Returns (config, migrated); migrated is True when legacy flat keys were found.
+    """
+    migrated = any(key in raw for key in LEGACY_KEYS)
+    cfg = {}
+    for key, (section, name) in NESTED.items():
+        value = (raw.get(section) or {}).get(name)
+        if migrated and raw.get(key) is not None:
+            value = raw[key]
+        cfg[key] = DEFAULTS.get(key) if value is None else value
+    cfg.setdefault("charger_host", None)
+    if cfg["charger_host"] is None:
+        cfg["charger_host"] = ""
+    if cfg["charger_port"] is None:
+        cfg["charger_port"] = 80 if cfg["charger_http"] else 443
+    vehicles = {}
+    for entry in (raw.get("evcc") or {}).get("vehicles") or []:
+        if isinstance(entry, dict) and str(entry.get("uid", "")).strip() and str(entry.get("vehicle", "")).strip():
+            vehicles[str(entry["uid"]).strip()] = str(entry["vehicle"]).strip()
+    cfg["uid_vehicle_map"] = vehicles
+    legacy_map = raw.get("uid_vehicle_map")
+    if migrated and isinstance(legacy_map, str) and legacy_map.strip() not in ("", "{}"):
+        try:
+            parsed = json.loads(legacy_map)
+            if not isinstance(parsed, dict):
+                raise TypeError
+            cfg["uid_vehicle_map"] = {**parsed, **vehicles}
+        except (TypeError, json.JSONDecodeError):
+            cfg["uid_vehicle_map"] = legacy_map  # rejected with a clear error by validate_options
+    cfg["solar_controls"] = raw.get("solar_controls", True) is not False
+    cfg["log_level"] = str(raw.get("log_level") or "info").lower()
+    return cfg, migrated
+
+def grouped_options(cfg, raw):
+    """The grouped options structure for a flat config, as stored by the Supervisor."""
+    grouped = {"charger": {}, "mqtt": {}, "limits": {}, "evcc": {}}
+    for key, (section, name) in NESTED.items():
+        value = cfg[key]
+        if key in OPTIONAL_KEYS and (value == "" or (
+                key == "charger_port" and value == (80 if cfg["charger_http"] else 443))):
+            continue  # optional and empty/derived: leave unset
+        grouped[section][name] = value
+    mapping = cfg["uid_vehicle_map"] if isinstance(cfg["uid_vehicle_map"], dict) else {}
+    grouped["evcc"]["vehicles"] = [{"uid": uid, "vehicle": vehicle} for uid, vehicle in mapping.items()]
+    return {**grouped, "solar_controls": cfg["solar_controls"], "log_level": cfg["log_level"]}
+
+def save_supervisor_options(grouped):
+    """Store migrated options through the Supervisor so legacy keys disappear from the UI."""
+    token = os.environ.get("SUPERVISOR_TOKEN")
+    if not token:
+        return False
+    try:
+        response = requests.post("http://supervisor/addons/self/options", json={"options": grouped},
+                                 headers={"Authorization": f"Bearer {token}"}, timeout=10)
+        response.raise_for_status()
+        return True
+    except Exception as exc:
+        LOG.warning("Could not store the migrated options (%s); re-enter them in the new layout", exc)
+        return False
+
 def options():
     # Home Assistant add-on options are mounted at /data/options.json.
     with open("/data/options.json", encoding="utf-8") as f:
-        cfg = json.load(f)
-    required = ("charger_host", "mqtt_host", "mqtt_topic_prefix", "discovery_prefix")
-    for key in required:
+        raw = json.load(f)
+    cfg, migrated = normalize_options(raw)
+    if migrated:
+        LOG.info("Migrating flat options to the grouped layout")
+        if save_supervisor_options(grouped_options(cfg, raw)):
+            LOG.info("Migrated options stored; the old keys are no longer needed")
+    for key in ("charger_host", "mqtt_host", "mqtt_topic_prefix", "discovery_prefix"):
         if not str(cfg.get(key, "")).strip():
-            raise ValueError(f"Option '{key}' is required")
+            raise ValueError(f"Option '{option_label(key)}' is required")
     return cfg
 
 def validate_options(cfg):
     if not 1 <= int(cfg["current_min"]) <= int(cfg["current_max"]) <= 64:
-        raise ValueError("Current limits must satisfy 1 <= current_min <= current_max <= 64 A")
+        raise ValueError("limits.current_min/current_max must satisfy 1 <= current_min <= current_max <= 64 A")
     comfort_max = Decimal(str(cfg.get("comfort_power_max_kw", 4.0)))
     if (not comfort_max.is_finite() or not Decimal("1.35") <= comfort_max <= Decimal("11.00")
             or (comfort_max * 1000) % 50):
-        raise ValueError("comfort_power_max_kw must be between 1.35 and 11.00 kW in steps of 0.05")
+        raise ValueError("limits.comfort_power_max_kw must be between 1.35 and 11.00 kW in steps of 0.05")
     for key in ("mqtt_topic_prefix", "discovery_prefix"):
         value = str(cfg[key]).strip("/")
         if not value or any(char in value for char in ("+", "#", " ")):
-            raise ValueError(f"Option '{key}' contains an invalid MQTT topic part")
+            raise ValueError(f"Option '{option_label(key)}' contains an invalid MQTT topic part")
     if str(cfg.get("evcc_base_url", "")).strip():
         if not str(cfg["evcc_base_url"]).strip().startswith(("http://", "https://")):
-            raise ValueError("evcc_base_url must start with http:// or https://")
+            raise ValueError("evcc.url must start with http:// or https://")
         try:
             if int(cfg.get("evcc_loadpoint_id", 1)) < 1:
                 raise ValueError
         except (TypeError, ValueError):
-            raise ValueError("evcc_loadpoint_id must be a positive integer") from None
+            raise ValueError("evcc.loadpoint must be a positive integer") from None
     try:
         uid_vehicle_map(cfg)
     except (TypeError, json.JSONDecodeError) as exc:
-        raise ValueError("uid_vehicle_map must be a JSON object of UID to vehicle name pairs") from exc
+        raise ValueError("evcc.vehicles must map RFID UIDs to vehicle names") from exc
 
 def toml_string(value):
     return json.dumps(str(value), ensure_ascii=False)
@@ -100,7 +195,9 @@ def run_alfen(cfg, *args, timeout=30):
     # alfenctl talks to one charger over TCP; serialize polling and control so
     # concurrent requests cannot overlap on the charger connection.
     with ALFEN_LOCK:
+        started = time.monotonic()
         result = subprocess.run(alfen_command(cfg, *args), capture_output=True, text=True, timeout=timeout)
+    LOG.debug("alfenctl %s -> exit %s in %.1fs", " ".join(args), result.returncode, time.monotonic() - started)
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or f"alfenctl exited {result.returncode}")
     for line in result.stderr.splitlines():
@@ -194,6 +291,13 @@ def publish_control_discovery(client, cfg, device_id, device):
         "command_topic": f"{root}/control/current", "state_topic": f"{root}/state/current_limit",
         "min": current_min, "max": current_max, "step": 1, "unit_of_measurement": "A",
         "mode": "slider", "optimistic": False, "retain": False, "device": device, **avail})
+    solar = cfg.get("solar_controls", True)
+    if not solar:
+        # Firmware without load-balancing properties: keep these entities out of Home Assistant.
+        for component, key in (("number", "comfort_power"), ("number", "green_share"), ("select", "solar_mode")):
+            client.publish(f"{discovery_prefix}/{component}/{device_id}/{key}/config", "", qos=1, retain=True)
+    if not solar:
+        return
     publish_config(client, cfg, "number", device_id, "comfort_power", {
         "name": "Comfort charging power", "unique_id": f"{device_id}_comfort_power",
         "device_class": "power", "icon": "mdi:solar-power", "has_entity_name": True,
@@ -272,6 +376,10 @@ def handle_command(cfg, topic, payload, retained=False):
         run_alfen(cfg, "current", "set", str(amps), "--socket", socket)
         LOG.info("Charging current for socket %s updated", socket)
         return str(amps)
+    if topic in (f"{root}/control/{name}" for name in ("comfort_power", "green_share", "solar_mode")) \
+            and not cfg.get("solar_controls", True):
+        LOG.warning("Ignored %s: solar controls are disabled in the options", topic.rsplit("/", 1)[-1])
+        return
     if topic == f"{root}/control/comfort_power":
         try:
             kw = Decimal(payload.strip())
@@ -934,9 +1042,10 @@ def poll_once(client, cfg, poll):
         poll.baseline_needed = False
     if poll.polls % CONTROL_POLL_EVERY == 0:
         publish_current_readback(client, cfg)
-        publish_solar_mode_readback(client, cfg)
-        publish_comfort_power_readback(client, cfg)
-        publish_green_share_readback(client, cfg)
+        if cfg.get("solar_controls", True):
+            publish_solar_mode_readback(client, cfg)
+            publish_comfort_power_readback(client, cfg)
+            publish_green_share_readback(client, cfg)
         publish_socket_readback(client, cfg)
         publish_override_readback(client, cfg)
     poll.polls += 1
@@ -957,6 +1066,7 @@ def stop_handler(_signum, _frame):
 def main():
     cfg = options()
     validate_options(cfg)
+    logging.getLogger().setLevel(getattr(logging, cfg.get("log_level", "info").upper(), logging.INFO))
     cfg = supervisor_mqtt(cfg)
     write_alfen_config(cfg)
     # Home Assistant stops add-ons with SIGTERM; as PID 1 we must handle it explicitly.

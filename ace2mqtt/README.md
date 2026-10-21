@@ -43,37 +43,77 @@ Mosquitto add-on works without any MQTT configuration. Set `mqtt_host`,
 
 ## Configuration
 
+Options are grouped in sections. Only the charger host and password are
+required; everything else has a sensible default.
+
+### Charger
+
 | Option | Default | Description |
 | --- | --- | --- |
-| `charger_host` | – | Hostname or IP address of the charger (required). |
-| `charger_port` | `443` | Port of the charger's management interface. |
-| `charger_username` | `admin` | Charger user name. |
-| `charger_password` | – | Charger password. |
-| `charger_http` | `false` | Use plain HTTP instead of HTTPS. |
-| `socket_number` | `1` | Socket (1 or 2) that the controls and RFID detection apply to. |
-| `current_min` / `current_max` | `6` / `32` | Range of the charging-current control, in ampere (1–64). The charger's station-wide limit lowers the maximum further, live. |
-| `comfort_power_max_kw` | `4.0` | Upper end of the Comfort power control, 1.35–11 kW in steps of 0.05. |
-| `poll_interval` | `10` | Seconds to wait between polls (5–300). This is a delay after a poll completes, not a fixed sampling period. |
-| `mqtt_host` / `mqtt_port` | `core-mosquitto` / `1883` | MQTT broker. |
-| `mqtt_username` / `mqtt_password` | empty | MQTT credentials. |
-| `mqtt_topic_prefix` | `ace2mqtt` | Prefix of all state, control and availability topics. Must not contain `+`, `#` or spaces. Use a different prefix per charger. |
-| `discovery_prefix` | `homeassistant` | MQTT Discovery prefix of Home Assistant. |
-| `evcc_base_url` | empty | Base URL of evcc, for example `http://evcc:7070`. Empty disables the evcc bridge. |
-| `evcc_loadpoint_id` | `1` | evcc loadpoint to assign the vehicle to. |
-| `evcc_password` | empty | evcc password, only needed when evcc authentication is enabled. |
-| `uid_vehicle_map` | `{}` | JSON object mapping RFID UIDs to evcc vehicle names. |
+| `charger.host` | – | Hostname or IP address of the charger (required). |
+| `charger.port` | derived | Optional. Defaults to 443, or 80 when `http` is on, so switching to HTTP no longer needs a port change. |
+| `charger.username` / `charger.password` | `admin` / – | Charger credentials. |
+| `charger.http` | `false` | Use plain HTTP instead of HTTPS. |
+| `charger.socket` | `1` | Socket (1 or 2) that the controls and RFID detection apply to. |
 
-Example evcc configuration:
+### MQTT
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `mqtt.host` / `mqtt.port` | `core-mosquitto` / `1883` | MQTT broker. |
+| `mqtt.username` / `mqtt.password` | unset | Optional credentials. |
+| `mqtt.topic_prefix` | `ace2mqtt` | Prefix of all state, control and availability topics. Must not contain `+`, `#` or spaces. Use a different prefix per charger. |
+| `mqtt.discovery_prefix` | `homeassistant` | MQTT Discovery prefix of Home Assistant. |
+
+With the default host and no username, the broker details come from the
+Supervisor's MQTT service, so the Mosquitto add-on needs no configuration.
+
+### Limits and polling
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `limits.current_min` / `limits.current_max` | `6` / `32` | Range of the charging-current control in ampere (1–64). The charger's station-wide limit lowers the maximum further, live. |
+| `limits.comfort_power_max_kw` | `4.0` | Upper end of the Comfort power control, 1.35–11 kW in steps of 0.05. |
+| `limits.poll_interval` | `10` | Seconds to wait between polls (5–300). A delay after a poll completes, not a fixed sampling period. |
+
+### evcc (optional)
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `evcc.url` | unset | Base URL of evcc, for example `http://evcc:7070`. Unset disables the evcc bridge. |
+| `evcc.loadpoint` | `1` | evcc loadpoint to assign the vehicle to. |
+| `evcc.password` | unset | Only needed when evcc authentication is enabled. |
+| `evcc.vehicles` | `[]` | One row per RFID card: its `uid` and the evcc vehicle's internal name. |
 
 ```yaml
-evcc_base_url: "http://evcc:7070"
-evcc_loadpoint_id: 1
-uid_vehicle_map: '{"04AABBCCDDEEFF":"vehicle_name"}'
+evcc:
+  url: "http://evcc:7070"
+  loadpoint: 1
+  vehicles:
+    - uid: "04AABBCCDDEEFF"
+      vehicle: "vehicle_name"
 ```
 
 Use the vehicle's **internal name** from evcc, not its display title. UIDs are
 matched case-insensitively and ignore separators, so `04:aa:bb:cc:dd:ee:ff`
 and `04AABBCCDDEEFF` are the same card.
+
+### General
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `solar_controls` | `true` | Show *Comfort charging power*, *Green share* and *Charging mode*. Turn off when the firmware does not support load balancing; the entities are then removed and not polled. |
+| `log_level` | `info` | `debug` logs every `alfenctl` call with its duration; useful when troubleshooting. |
+
+### Upgrading from versions before 0.2
+
+Earlier versions used a flat option list (`charger_host`, `mqtt_host`,
+`uid_vehicle_map` as JSON, …). The old keys are still accepted by the schema so
+an existing install starts normally. On startup the add-on converts them to the
+grouped layout and stores the result through the Supervisor, after which the
+old fields are empty. If the Supervisor cannot be reached the converted values
+are used for that run and a warning is logged; re-enter them in the new layout
+then. The empty "Legacy" fields will be removed in a later version.
 
 ## Entities
 
@@ -181,11 +221,10 @@ for the next session instead of risking an old card.
 ## Troubleshooting
 
 - **No entities** – check the add-on log. Verify the charger host, port and
-  credentials, and that the MQTT integration uses the same discovery prefix.
+  credentials (set `log_level: debug` for details), and that the MQTT integration uses the same discovery prefix.
 - **Warnings that a value cannot be read** – some firmware versions do not
   support every property (Comfort power, Green share). The previous value is
-  kept and the warning repeats; ignore the entity if you do not use solar
-  charging.
+  kept and the warning repeats; turn off `solar_controls` to hide them.
 - **Everything unavailable** – the charger could not be polled; see the log
   for the reason. *Last successful poll* shows when it last worked.
 - **evcc vehicle not assigned** – the UID is not in `uid_vehicle_map`, the
@@ -202,7 +241,7 @@ for the next session instead of risking an old card.
 - RFID is derived from transactions: rejected scans and cards the charger does
   not record cannot be identified, and a short authorisation can fall between
   polls.
-- Only one socket is controlled per add-on instance (`socket_number`); status
+- Only one socket is controlled per add-on instance (`charger.socket`); status
   of both sockets is published.
 
 ## Development

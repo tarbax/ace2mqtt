@@ -1,61 +1,143 @@
 configuration:
+  charger:
+    name: Charger
+    description: Connection to the Alfen charger and the socket that is controlled.
+    fields:
+      host:
+        name: Host
+        description: Hostname or IP address of the charger.
+      port:
+        name: Port
+        description: Optional. Defaults to 443 for HTTPS or 80 for HTTP.
+      username:
+        name: Username
+        description: User name for the charger's management interface.
+      password:
+        name: Password
+        description: Password for the charger's management interface.
+      http:
+        name: Use HTTP
+        description: Talk to the charger over plain HTTP instead of HTTPS.
+      socket:
+        name: Socket
+        description: Socket (1 or 2) that the controls and RFID detection apply to.
+  mqtt:
+    name: MQTT
+    description: Leave host at core-mosquitto with an empty username to use the Mosquitto add-on automatically.
+    fields:
+      host:
+        name: Host
+        description: Hostname of the MQTT broker.
+      port:
+        name: Port
+        description: Port of the MQTT broker.
+      username:
+        name: Username
+        description: Optional. Leave empty to use the Supervisor MQTT service or an anonymous broker.
+      password:
+        name: Password
+        description: Optional password for the MQTT broker.
+      topic_prefix:
+        name: Topic prefix
+        description: Prefix for state, control and availability topics. Use a unique prefix per charger.
+      discovery_prefix:
+        name: Discovery prefix
+        description: MQTT Discovery prefix configured in Home Assistant.
+  limits:
+    name: Limits and polling
+    description: Ranges of the controls and how often the charger is polled.
+    fields:
+      current_min:
+        name: Minimum charging current (A)
+        description: Lower end of the charging current control.
+      current_max:
+        name: Maximum charging current (A)
+        description: Upper end of the charging current control (at most 64 A).
+      comfort_power_max_kw:
+        name: Maximum Comfort power (kW)
+        description: Upper end of the Comfort power control, 1.35-11 kW in steps of 0.05.
+      poll_interval:
+        name: Poll interval (s)
+        description: Seconds to wait between polls of the charger.
+  evcc:
+    name: evcc
+    description: Optional. Assigns a vehicle in evcc based on the RFID card that was used.
+    fields:
+      url:
+        name: URL
+        description: For example http://evcc:7070. Leave empty to disable the evcc vehicle assignment.
+      loadpoint:
+        name: Loadpoint
+        description: evcc loadpoint number the vehicle is assigned to.
+      password:
+        name: Password
+        description: Only needed when evcc authentication is enabled.
+      vehicles:
+        name: Vehicles
+        description: One row per RFID card, with its UID and the evcc internal vehicle name.
+  solar_controls:
+    name: Solar controls
+    description: Show Comfort power, Green share and Charging mode. Turn off when the firmware does not support them.
+  log_level:
+    name: Log level
+    description: Use debug to log every alfenctl call when troubleshooting.
   charger_host:
-    name: Charger host
-    description: Hostname or IP address of the Alfen charger.
+    name: Legacy - charger host
+    description: Old flat option. Migrated automatically; leave empty.
   charger_port:
-    name: Charger port
-    description: Port of the charger's management interface (default 443).
+    name: Legacy - charger port
+    description: Old flat option. Migrated automatically; leave empty.
   charger_username:
-    name: Charger username
-    description: User name for the charger's management interface.
+    name: Legacy - charger username
+    description: Old flat option. Migrated automatically; leave empty.
   charger_password:
-    name: Charger password
-    description: Password for the charger's management interface.
+    name: Legacy - charger password
+    description: Old flat option. Migrated automatically; leave empty.
   charger_http:
-    name: Use HTTP
-    description: Talk to the charger over plain HTTP instead of HTTPS.
+    name: Legacy - use HTTP
+    description: Old flat option. Migrated automatically; leave empty.
   socket_number:
-    name: Socket number
-    description: Socket that the controls and RFID detection apply to.
+    name: Legacy - socket
+    description: Old flat option. Migrated automatically; leave empty.
   current_min:
-    name: Minimum charging current (A)
-    description: Lower end of the charging current control.
+    name: Legacy - minimum current
+    description: Old flat option. Migrated automatically; leave empty.
   current_max:
-    name: Maximum charging current (A)
-    description: Upper end of the charging current control (at most 64 A).
+    name: Legacy - maximum current
+    description: Old flat option. Migrated automatically; leave empty.
   comfort_power_max_kw:
-    name: Maximum Comfort power (kW)
-    description: Upper end of the Comfort power control, 1.35-11 kW in steps of 0.05.
+    name: Legacy - maximum Comfort power
+    description: Old flat option. Migrated automatically; leave empty.
   poll_interval:
-    name: Poll interval (s)
-    description: Seconds to wait between polls of the charger.
+    name: Legacy - poll interval
+    description: Old flat option. Migrated automatically; leave empty.
   mqtt_host:
-    name: MQTT host
-    description: Leave at core-mosquitto with an empty username to use the Mosquitto add-on automatically.
+    name: Legacy - MQTT host
+    description: Old flat option. Migrated automatically; leave empty.
   mqtt_port:
-    name: MQTT port
-    description: Port of the MQTT broker.
+    name: Legacy - MQTT port
+    description: Old flat option. Migrated automatically; leave empty.
   mqtt_username:
-    name: MQTT username
-    description: Leave empty to use the Supervisor MQTT service or an anonymous broker.
+    name: Legacy - MQTT username
+    description: Old flat option. Migrated automatically; leave empty.
   mqtt_password:
-    name: MQTT password
-    description: Password for the MQTT broker.
+    name: Legacy - MQTT password
+    description: Old flat option. Migrated automatically; leave empty.
   mqtt_topic_prefix:
-    name: MQTT topic prefix
-    description: Prefix for state, control and availability topics. Use a unique prefix per charger.
+    name: Legacy - topic prefix
+    description: Old flat option. Migrated automatically; leave empty.
   discovery_prefix:
-    name: Discovery prefix
-    description: MQTT Discovery prefix configured in Home Assistant.
+    name: Legacy - discovery prefix
+    description: Old flat option. Migrated automatically; leave empty.
   evcc_base_url:
-    name: evcc base URL
-    description: For example http://evcc:7070. Leave empty to disable the evcc vehicle assignment.
+    name: Legacy - evcc URL
+    description: Old flat option. Migrated automatically; leave empty.
   evcc_loadpoint_id:
-    name: evcc loadpoint
-    description: Loadpoint number the vehicle is assigned to.
+    name: Legacy - evcc loadpoint
+    description: Old flat option. Migrated automatically; leave empty.
   evcc_password:
-    name: evcc password
-    description: Only needed when evcc authentication is enabled.
+    name: Legacy - evcc password
+    description: Old flat option. Migrated automatically; leave empty.
   uid_vehicle_map:
-    name: RFID to vehicle map
-    description: 'JSON object mapping RFID UIDs to evcc vehicle names, e.g. {"04AABBCCDDEEFF":"my_car"}.'
+    name: Legacy - RFID to vehicle map
+    description: Old JSON option. Migrated automatically into the evcc vehicles list; leave empty.
