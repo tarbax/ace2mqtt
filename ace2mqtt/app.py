@@ -4,7 +4,9 @@ import json
 import logging
 import math
 import os
+import queue
 import re
+import signal
 import subprocess
 import threading
 import time
@@ -24,6 +26,12 @@ EVCC_RETRY_DELAYS = (1, 3, 5)
 RFID_SEARCH_SECONDS = 180
 # alfenctl 0.1.0 loadbalancing.SOLAR_MODES; --solar-mode expects an integer.
 SOLAR_MODE_VALUES = {"off": "0", "comfort": "1", "green": "2"}
+STOP = threading.Event()
+# Control readbacks cost one alfenctl process each; external changes (for
+# example from the Alfen app) are picked up every Nth poll, own writes at once.
+CONTROL_POLL_EVERY = 3
+RFID_RETRY_SECONDS = 15
+MAX_BACKOFF_SECONDS = 60
 
 def clean_id(value):
     return re.sub(r"[^a-z0-9_]+", "_", value.lower()).strip("_") or "value"
@@ -75,7 +83,9 @@ def write_alfen_config(cfg):
         f"host = {toml_string(cfg['charger_host'])}\n"
         f"http = {'true' if cfg.get('charger_http') else 'false'}\n"
     )
-    with open("/data/alfen.toml", "w", encoding="utf-8") as f:
+    # Create the file private from the start so the password is never readable.
+    with open("/data/alfen.toml", "w", encoding="utf-8",
+              opener=lambda path, flags: os.open(path, flags, 0o600)) as f:
         f.write(content)
     os.chmod("/data/alfen.toml", 0o600)
 
@@ -104,9 +114,35 @@ def run_status(cfg):
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"alfenctl gaf geen geldige JSON-status: {exc}") from exc
 
+class PublishCache:
+    """Publish wrapper that skips payloads identical to the last one sent.
+
+    Discovery configs and unchanged states are retained on the broker, so they
+    only need to be sent again after a (re)connect, which calls reset().
+    """
+    def __init__(self, client):
+        self.client = client
+        self.sent = {}
+
+    def publish(self, topic, payload, qos=0, retain=False):
+        if self.sent.get(topic) == payload:
+            return None
+        self.sent[topic] = payload
+        return self.client.publish(topic, payload, qos=qos, retain=retain)
+
+    def reset(self):
+        self.sent.clear()
+
+def availability_fields(root):
+    return {"availability_topic": f"{root}/availability",
+            "payload_available": "online", "payload_not_available": "offline"}
+
+def publish_config(client, cfg, component, device_id, key, config):
+    topic = f"{cfg['discovery_prefix'].strip('/')}/{component}/{device_id}/{key}/config"
+    client.publish(topic, json.dumps(config, ensure_ascii=False), qos=1, retain=True)
+
 def discovery_switch(client, cfg, device_id, device, key, name):
     root = cfg["mqtt_topic_prefix"].strip("/")
-    topic = f"{cfg['discovery_prefix'].strip('/')}/switch/{device_id}/{key}/config"
     config = {
         "name": name,
         "unique_id": f"{device_id}_{key}",
@@ -115,10 +151,9 @@ def discovery_switch(client, cfg, device_id, device, key, name):
         "payload_on": "ON", "payload_off": "OFF",
         "state_on": "ON", "state_off": "OFF",
         "optimistic": False, "retain": False, "device": device,
-        "availability_topic": f"{root}/availability",
-        "payload_available": "online", "payload_not_available": "offline",
+        **availability_fields(root),
     }
-    client.publish(topic, json.dumps(config, ensure_ascii=False), qos=1, retain=True)
+    publish_config(client, cfg, "switch", device_id, key, config)
 
 def effective_current_bounds(cfg):
     """Apply the live station-wide current ceiling to the configured bounds."""
@@ -134,90 +169,42 @@ def effective_current_bounds(cfg):
 
 def publish_control_discovery(client, cfg, device_id, device):
     socket = int(cfg["socket_number"])
-    switches = (
-        ("socket", f"Socket {socket}"),
-        ("charging_profile_override", "Laadprofieloverride"),
-    )
-    for key, name in switches:
+    root = cfg["mqtt_topic_prefix"].strip("/")
+    avail = availability_fields(root)
+    for key, name in (("socket", f"Socket {socket}"),
+                      ("charging_profile_override", "Laadprofieloverride")):
         discovery_switch(client, cfg, device_id, device, key, name)
     # Remove the previous button entities from MQTT Discovery.
     discovery_prefix = cfg["discovery_prefix"].strip("/")
     for key in ("socket_enable", "socket_disable", "direct_start_on", "direct_start_off"):
         client.publish(f"{discovery_prefix}/button/{device_id}/{key}/config", "", qos=1, retain=True)
-    root = cfg["mqtt_topic_prefix"].strip("/")
-    rfid_topic = f"{discovery_prefix}/sensor/{device_id}/rfid_id/config"
-    rfid_sensor = {
-        "name": "Laatste RFID-ID",
-        "unique_id": f"{device_id}_rfid_id",
-        "state_topic": f"{root}/state/rfid_id",
-        "icon": "mdi:card-account-details",
-        "device": device,
-        "availability_topic": f"{root}/availability",
-        "payload_available": "online", "payload_not_available": "offline",
-    }
-    client.publish(rfid_topic, json.dumps(rfid_sensor, ensure_ascii=False), qos=1, retain=True)
-    rfid_pulse_topic = f"{discovery_prefix}/sensor/{device_id}/rfid_id_pulse/config"
-    rfid_pulse_sensor = {
-        "name": "RFID-ID",
-        "unique_id": f"{device_id}_rfid_id_pulse",
-        "state_topic": f"{root}/state/rfid_id_pulse",
-        "icon": "mdi:card-account-details-outline",
-        "device": device,
-        "availability_topic": f"{root}/availability",
-        "payload_available": "online", "payload_not_available": "offline",
-    }
-    client.publish(rfid_pulse_topic, json.dumps(rfid_pulse_sensor, ensure_ascii=False), qos=1, retain=True)
-    number_topic = f"{cfg['discovery_prefix'].strip('/')}/number/{device_id}/current_limit/config"
+    for key, name, icon in (("rfid_id", "Laatste RFID-ID", "mdi:card-account-details"),
+                            ("rfid_id_pulse", "RFID-ID", "mdi:card-account-details-outline")):
+        publish_config(client, cfg, "sensor", device_id, key, {
+            "name": name, "unique_id": f"{device_id}_{key}", "state_topic": f"{root}/state/{key}",
+            "icon": icon, "device": device, **avail})
     current_min, current_max = effective_current_bounds(cfg)
-    number = {"name": f"Laadstroom socket {socket}", "unique_id": f"{device_id}_current_limit",
-              "command_topic": f"{root}/control/current", "state_topic": f"{root}/state/current_limit",
-              "min": current_min,
-              "max": current_max, "step": 1, "unit_of_measurement": "A",
-              "mode": "slider", "optimistic": False, "retain": False, "device": device,
-              "availability_topic": f"{root}/availability", "payload_available": "online",
-              "payload_not_available": "offline"}
-    client.publish(number_topic, json.dumps(number, ensure_ascii=False), qos=1, retain=True)
-    comfort_topic = f"{cfg['discovery_prefix'].strip('/')}/number/{device_id}/comfort_power/config"
-    comfort_number = {
-        "name": "Comfort laadvermogen",
-        "unique_id": f"{device_id}_comfort_power",
-        "command_topic": f"{root}/control/comfort_power",
-        "state_topic": f"{root}/state/comfort_power",
+    publish_config(client, cfg, "number", device_id, "current_limit", {
+        "name": f"Laadstroom socket {socket}", "unique_id": f"{device_id}_current_limit",
+        "command_topic": f"{root}/control/current", "state_topic": f"{root}/state/current_limit",
+        "min": current_min, "max": current_max, "step": 1, "unit_of_measurement": "A",
+        "mode": "slider", "optimistic": False, "retain": False, "device": device, **avail})
+    publish_config(client, cfg, "number", device_id, "comfort_power", {
+        "name": "Comfort laadvermogen", "unique_id": f"{device_id}_comfort_power",
+        "command_topic": f"{root}/control/comfort_power", "state_topic": f"{root}/state/comfort_power",
         "min": 1.35, "max": float(Decimal(str(cfg.get("comfort_power_max_kw", 4.0)))), "step": 0.05,
         "unit_of_measurement": "kW", "mode": "slider",
-        "optimistic": False, "retain": False, "device": device,
-        "availability_topic": f"{root}/availability",
-        "payload_available": "online", "payload_not_available": "offline",
-    }
-    client.publish(comfort_topic, json.dumps(comfort_number, ensure_ascii=False), qos=1, retain=True)
-    green_share_topic = f"{cfg['discovery_prefix'].strip('/')}/number/{device_id}/green_share/config"
-    green_share_number = {
-        "name": "Green share",
-        "unique_id": f"{device_id}_green_share",
-        "command_topic": f"{root}/control/green_share",
-        "state_topic": f"{root}/state/green_share",
-        "min": 0, "max": 100, "step": 1,
-        "unit_of_measurement": "%", "mode": "slider",
-        "optimistic": False, "retain": False, "device": device,
-        "availability_topic": f"{root}/availability",
-        "payload_available": "online", "payload_not_available": "offline",
-    }
-    client.publish(green_share_topic, json.dumps(green_share_number, ensure_ascii=False), qos=1, retain=True)
-    solar_topic = f"{cfg['discovery_prefix'].strip('/')}/select/{device_id}/solar_mode/config"
-    solar_select = {
-        "name": "Laadmodus",
-        "unique_id": f"{device_id}_solar_mode",
-        "command_topic": f"{root}/control/solar_mode",
-        "state_topic": f"{root}/state/solar_mode",
-        "options": list(SOLAR_MODE_VALUES),
-        "optimistic": False,
-        "retain": False,
-        "device": device,
-        "availability_topic": f"{root}/availability",
-        "payload_available": "online",
-        "payload_not_available": "offline",
-    }
-    client.publish(solar_topic, json.dumps(solar_select, ensure_ascii=False), qos=1, retain=True)
+        "optimistic": False, "retain": False, "device": device, **avail})
+    publish_config(client, cfg, "number", device_id, "green_share", {
+        "name": "Green share", "unique_id": f"{device_id}_green_share",
+        "command_topic": f"{root}/control/green_share", "state_topic": f"{root}/state/green_share",
+        "min": 0, "max": 100, "step": 1, "unit_of_measurement": "%", "mode": "slider",
+        "optimistic": False, "retain": False, "device": device, **avail})
+    publish_config(client, cfg, "select", device_id, "solar_mode", {
+        "name": "Laadmodus", "unique_id": f"{device_id}_solar_mode",
+        "command_topic": f"{root}/control/solar_mode", "state_topic": f"{root}/state/solar_mode",
+        "options": list(SOLAR_MODE_VALUES), "optimistic": False, "retain": False,
+        "device": device, **avail})
 
 def handle_command(cfg, topic, payload, retained=False):
     """Translate a small fixed command set to alfenctl; never accept shell text."""
@@ -269,8 +256,8 @@ def handle_command(cfg, topic, payload, retained=False):
             LOG.warning("Laadstroom moet een geheel aantal ampere zijn")
             return
         amps = int(numeric_amps)
-        _, current_max = effective_current_bounds(cfg)
-        current_min = max(1, int(cfg["current_min"]))
+        current_min, current_max = effective_current_bounds(cfg)
+        current_min = max(1, current_min)
         if not current_min <= amps <= current_max:
             LOG.warning("Laadstroom buiten ingestelde grens (%s-%s A)", current_min, current_max)
             return
@@ -321,6 +308,10 @@ def subscribe_commands(client, cfg):
 
 def mqtt_connected(client, cfg):
     subscribe_commands(client, cfg)
+    # A fresh broker session may have lost retained discovery and state.
+    cache = getattr(client, "ace_cache", None)
+    if cache is not None:
+        cache.reset()
 
 def on_message(client, cfg, message):
     try:
@@ -338,7 +329,7 @@ def on_message(client, cfg, message):
                 "socket": publish_socket_readback,
                 "charging_profile_override": publish_override_readback,
             }
-            if value is not None:
+            if value is not None and name in readers:
                 readers[name](client, cfg)
             elif not message.retain and payload == "PRESS":
                 if name in ("socket_enable", "socket_disable"):
@@ -363,19 +354,58 @@ def flatten(obj, prefix=""):
             values[prefix] = obj
     return values
 
+def command_worker(client, cfg, commands):
+    """Run commands off the paho network thread so slow alfenctl calls cannot stall MQTT."""
+    while True:
+        message = commands.get()
+        if message is None:
+            return
+        on_message(client, cfg, message)
+
 def connect_mqtt(cfg):
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="ace2mqtt")
+    # One client id per charger so two add-on instances do not kick each other off.
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
+                         client_id=f"ace2mqtt_{clean_id(cfg['charger_host'])}")
     username, password = cfg.get("mqtt_username"), cfg.get("mqtt_password")
     if username:
         client.username_pw_set(username, password or None)
     root = cfg["mqtt_topic_prefix"].strip("/")
     client.will_set(f"{root}/availability", "offline", qos=1, retain=True)
+    client.reconnect_delay_set(min_delay=1, max_delay=60)
+    client.ace_cache = PublishCache(client)
+    commands = queue.Queue()
+    client.ace_commands = commands
+    threading.Thread(target=command_worker, args=(client, cfg, commands), daemon=True).start()
     client.on_connect = lambda connected_client, _userdata, _flags, _reason, _properties: mqtt_connected(
         connected_client, cfg)
-    client.on_message = lambda _client, _userdata, message: on_message(_client, cfg, message)
+    client.on_message = lambda _client, _userdata, message: commands.put(message)
     client.connect(cfg["mqtt_host"], int(cfg["mqtt_port"]), keepalive=60)
     client.loop_start()
     return client
+
+SENSOR_METADATA = (
+    (r"temperature_c", {"device_class": "temperature", "unit_of_measurement": "°C",
+                        "state_class": "measurement"}),
+    (r"currents_a_\d+", {"device_class": "current", "unit_of_measurement": "A",
+                         "state_class": "measurement"}),
+    (r"voltages_v_\d+", {"device_class": "voltage", "unit_of_measurement": "V",
+                         "state_class": "measurement"}),
+    (r"active_power_w", {"device_class": "power", "unit_of_measurement": "W",
+                         "state_class": "measurement"}),
+    (r"energy_(delivered|consumed)_kwh", {"device_class": "energy", "unit_of_measurement": "kWh",
+                                          "state_class": "total_increasing"}),
+    (r"(max_station|max_installation|active_safe)_current_a",
+     {"device_class": "current", "unit_of_measurement": "A", "entity_category": "diagnostic"}),
+    (r"sockets_\d+_(mode3|led|power|error|error_code|error_severity)",
+     {"entity_category": "diagnostic"}),
+)
+
+def sensor_metadata(key):
+    """Home Assistant classes for known alfenctl status fields (Energy dashboard etc.)."""
+    for pattern, metadata in SENSOR_METADATA:
+        if re.fullmatch(pattern, key):
+            return dict(metadata)
+    return {}
 
 def publish_discovery(client, cfg, state):
     root = cfg["mqtt_topic_prefix"].strip("/")
@@ -403,7 +433,9 @@ def publish_discovery(client, cfg, state):
             component = "binary_sensor"
             config.update({"payload_on": "true", "payload_off": "false"})
         elif isinstance(value, (int, float)):
-            config["suggested_display_precision"] = 2
+            config.update(sensor_metadata(key))
+            if isinstance(value, float):
+                config["suggested_display_precision"] = 2
         if value is None or isinstance(value, (dict, list)):
             continue
         topic = f"{cfg['discovery_prefix'].strip('/')}/{component}/{device_id}/{entity}/config"
@@ -518,12 +550,19 @@ def publish_override_readback(client, cfg):
     return publish_switch_readback(client, cfg, override=True)
 
 
-def needs_rfid_readback(status, socket_number):
-    """Whether the selected socket currently reports a card authorization."""
+def socket_entries(status, socket_number):
+    """Yield the status entries of the selected socket, ignoring malformed ones."""
     sockets = status.get("sockets", []) if isinstance(status, dict) else []
     for socket in sockets:
-        if not isinstance(socket, dict) or int(socket.get("socket", 0)) != int(socket_number):
+        try:
+            if isinstance(socket, dict) and int(socket.get("socket", 0)) == int(socket_number):
+                yield socket
+        except (TypeError, ValueError):
             continue
+
+def needs_rfid_readback(status, socket_number):
+    """Whether the selected socket currently reports a card authorization."""
+    for socket in socket_entries(status, socket_number):
         states = {str(socket.get(key, "")).strip().lower() for key in ("state", "display")}
         if states & {"nfc authorised", "nfc authorized", "authorised", "authorized"}:
             return True
@@ -531,10 +570,7 @@ def needs_rfid_readback(status, socket_number):
 
 def socket_has_vehicle(status, socket_number):
     """Recognise a new plug-in even when the short NFC state was missed."""
-    sockets = status.get("sockets", []) if isinstance(status, dict) else []
-    for socket in sockets:
-        if not isinstance(socket, dict) or int(socket.get("socket", 0)) != int(socket_number):
-            continue
+    for socket in socket_entries(status, socket_number):
         mode3 = str(socket.get("mode3", "")).strip().upper()
         if mode3:
             return mode3[0] in "BCD"
@@ -660,6 +696,15 @@ def assign_evcc_vehicle(cfg, tag):
             response.raise_for_status()
             LOG.info("evcc-laadpunt %s ingesteld op voertuig %s", loadpoint, vehicle)
             return True
+        except requests.HTTPError as exc:
+            status_code = exc.response.status_code if exc.response is not None else 0
+            if 400 <= status_code < 500 and status_code != 429:
+                LOG.error("evcc wees de aanroep af (HTTP %s); controleer voertuignaam en laadpunt", status_code)
+                return False
+            if attempt < len(EVCC_RETRY_DELAYS):
+                LOG.warning("evcc-aanroep mislukt: %s (opnieuw proberen)", exc)
+            else:
+                LOG.error("evcc-aanroep mislukt; retries opgebruikt: %s", exc)
         except Exception as exc:
             if attempt < len(EVCC_RETRY_DELAYS):
                 LOG.warning("evcc-aanroep mislukt: %s (opnieuw proberen)", exc)
@@ -738,64 +783,108 @@ def publish_green_share_readback(client, cfg):
         LOG.warning("Green share teruglezen mislukt: %s", exc)
         return False
 
+def supervisor_mqtt(cfg):
+    """Use the Supervisor's MQTT service when no broker credentials were configured."""
+    token = os.environ.get("SUPERVISOR_TOKEN")
+    if not token or cfg.get("mqtt_username") or cfg["mqtt_host"] != "core-mosquitto":
+        return cfg
+    try:
+        response = requests.get("http://supervisor/services/mqtt", timeout=10,
+                                headers={"Authorization": f"Bearer {token}"})
+        response.raise_for_status()
+        data = response.json()["data"]
+        LOG.info("MQTT-gegevens opgehaald via de Supervisor")
+        return {**cfg, "mqtt_host": data["host"], "mqtt_port": data["port"],
+                "mqtt_username": data.get("username", ""), "mqtt_password": data.get("password", "")}
+    except Exception as exc:
+        LOG.warning("MQTT-service van Supervisor niet beschikbaar (%s); instellingen worden gebruikt", exc)
+        return cfg
+
+class PollState:
+    """Plug-in/RFID tracking that must survive transient charger or broker errors."""
+    def __init__(self):
+        self.session_active = False
+        self.rfid_handled = False
+        self.rfid_deadline = 0
+        self.next_rfid_try = 0
+        self.connected_at = None
+        self.baseline_offset = None
+        self.baseline_needed = True
+        self.polls = 0
+
+def poll_once(client, cfg, poll):
+    status = run_status(cfg)
+    publish_discovery(client.ace_cache, cfg, status)
+    active = socket_has_vehicle(status, cfg["socket_number"])
+    now = time.monotonic()
+    if active and not poll.session_active:
+        poll.connected_at = datetime.now().astimezone()
+        poll.rfid_deadline = now + RFID_SEARCH_SECONDS
+        poll.next_rfid_try = 0
+        poll.rfid_handled = False
+        poll.baseline_needed = True
+    elif not active and poll.session_active:
+        poll.baseline_needed = True
+    poll.session_active = active
+    if active and not poll.rfid_handled and now < poll.rfid_deadline and now >= poll.next_rfid_try:
+        poll.rfid_handled = publish_latest_rfid_id(client, cfg, poll.connected_at, poll.baseline_offset)
+        poll.next_rfid_try = now + RFID_RETRY_SECONDS
+    elif not active and poll.baseline_needed:
+        poll.baseline_offset = read_transaction_offset(cfg)
+        poll.baseline_needed = False
+    if poll.polls % CONTROL_POLL_EVERY == 0:
+        publish_current_readback(client, cfg)
+        publish_solar_mode_readback(client, cfg)
+        publish_comfort_power_readback(client, cfg)
+        publish_green_share_readback(client, cfg)
+        publish_socket_readback(client, cfg)
+        publish_override_readback(client, cfg)
+    poll.polls += 1
+    client.publish(f"{cfg['mqtt_topic_prefix'].strip('/')}/availability", "online", qos=1, retain=True)
+
+def publish_offline(client, cfg):
+    try:
+        info = client.publish(f"{cfg['mqtt_topic_prefix'].strip('/')}/availability", "offline", qos=1, retain=True)
+        info.wait_for_publish(timeout=2)
+    except Exception:
+        pass
+
+def stop_handler(_signum, _frame):
+    STOP.set()
+
 def main():
     cfg = options()
     validate_options(cfg)
+    cfg = supervisor_mqtt(cfg)
     write_alfen_config(cfg)
-    while True:
-        client = None
+    # Home Assistant stops add-ons with SIGTERM; as PID 1 we must handle it explicitly.
+    signal.signal(signal.SIGTERM, stop_handler)
+    signal.signal(signal.SIGINT, stop_handler)
+    client = None
+    poll = PollState()
+    failures = 0
+    while not STOP.is_set():
         try:
-            client = connect_mqtt(cfg)
-            session_active = False
-            rfid_handled = False
-            rfid_deadline = 0
-            connected_at = None
-            baseline_offset = None
-            baseline_needed = True
-            LOG.info("Verbonden met MQTT; Alfen status wordt opgehaald van %s", cfg["charger_host"])
-            while True:
-                status = run_status(cfg)
-                publish_discovery(client, cfg, status)
-                active = socket_has_vehicle(status, cfg["socket_number"])
-                if active and not session_active:
-                    connected_at = datetime.now().astimezone()
-                    rfid_deadline = time.monotonic() + RFID_SEARCH_SECONDS
-                    rfid_handled = False
-                    baseline_needed = True
-                elif not active and session_active:
-                    baseline_needed = True
-                session_active = active
-                if active and not rfid_handled and time.monotonic() < rfid_deadline:
-                    rfid_handled = publish_latest_rfid_id(client, cfg, connected_at, baseline_offset)
-                elif not active and baseline_needed:
-                    baseline_offset = read_transaction_offset(cfg)
-                    baseline_needed = False
-                publish_current_readback(client, cfg)
-                publish_solar_mode_readback(client, cfg)
-                publish_comfort_power_readback(client, cfg)
-                publish_green_share_readback(client, cfg)
-                publish_socket_readback(client, cfg)
-                publish_override_readback(client, cfg)
-                client.publish(f"{cfg['mqtt_topic_prefix'].strip('/')}/availability", "online", qos=1, retain=True)
-                time.sleep(int(cfg["poll_interval"]))
-        except KeyboardInterrupt:
-            if client:
-                info = client.publish(f"{cfg['mqtt_topic_prefix'].strip('/')}/availability", "offline", qos=1, retain=True)
-                info.wait_for_publish(timeout=2)
-                client.loop_stop()
-                client.disconnect()
-            break
+            if client is None:
+                client = connect_mqtt(cfg)
+                LOG.info("Verbonden met MQTT; Alfen status wordt opgehaald van %s", cfg["charger_host"])
+            poll_once(client, cfg, poll)
+            if failures:
+                LOG.info("Uitlezen hersteld")
+            failures = 0
+            delay = int(cfg["poll_interval"])
         except Exception as exc:
+            failures += 1
             LOG.error("Uitlezen/publiceren mislukt: %s", exc)
             if client:
-                try:
-                    info = client.publish(f"{cfg['mqtt_topic_prefix'].strip('/')}/availability", "offline", qos=1, retain=True)
-                    info.wait_for_publish(timeout=2)
-                    client.loop_stop()
-                    client.disconnect()
-                except Exception:
-                    pass
-            time.sleep(10)
+                publish_offline(client, cfg)
+            # Keep MQTT and the session state; only back off from the failing side.
+            delay = min(MAX_BACKOFF_SECONDS, 10 * 2 ** min(failures - 1, 3))
+        STOP.wait(delay)
+    if client:
+        publish_offline(client, cfg)
+        client.loop_stop()
+        client.disconnect()
 
 if __name__ == "__main__":
     main()

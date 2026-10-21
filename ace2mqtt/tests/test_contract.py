@@ -145,20 +145,104 @@ Random delay  0 s (below the compliant 600 s)
             self.assertEqual(app.run_alfen(CFG, 'direct-start', 'on'), 'result')
         self.assertIn('no profile installed', logs.output[0])
 
-    def test_all_controls_are_refreshed_on_each_poll(self):
+    def _run_main(self, waits, run_status, connect=None):
         from contextlib import ExitStack
         readers = ['current', 'solar_mode', 'comfort_power', 'green_share', 'socket', 'override']
+        client = Mock()
+        app.STOP.clear()
+        def wait(_delay):
+            if not waits:
+                app.STOP.set()
+            else:
+                waits.pop(0)
+            return app.STOP.is_set()
         with ExitStack() as stack:
             stack.enter_context(patch('app.options', return_value={**CFG, 'poll_interval': 10}))
             stack.enter_context(patch('app.write_alfen_config'))
-            stack.enter_context(patch('app.connect_mqtt', return_value=Mock()))
-            stack.enter_context(patch('app.run_status', return_value={'sockets': []}))
+            stack.enter_context(patch('app.supervisor_mqtt', side_effect=lambda cfg: cfg))
+            stack.enter_context(patch('app.signal.signal'))
+            connect_mock = stack.enter_context(patch('app.connect_mqtt', return_value=client))
+            stack.enter_context(patch('app.run_status', side_effect=run_status))
             stack.enter_context(patch('app.publish_discovery'))
-            stack.enter_context(patch('app.time.sleep', side_effect=[None, KeyboardInterrupt]))
+            stack.enter_context(patch('app.read_transaction_offset', return_value=-1))
+            stack.enter_context(patch.object(app.STOP, 'wait', side_effect=wait))
             mocks = [stack.enter_context(patch(f'app.publish_{name}_readback', return_value=True)) for name in readers]
-            app.main()
-            for reader in mocks:
-                self.assertEqual(reader.call_count, 2)
+            try:
+                app.main()
+            finally:
+                app.STOP.clear()
+        return client, connect_mock, mocks
+
+    def test_controls_are_refreshed_every_nth_poll(self):
+        _, _, mocks = self._run_main([None, None, None], lambda _cfg: {'sockets': []})
+        for reader in mocks:
+            self.assertEqual(reader.call_count, 2)  # polls 0 and 3 of 4
+
+    def test_poll_failure_keeps_mqtt_client_and_session_state(self):
+        calls = iter([{'sockets': []}, RuntimeError('charger timeout'), {'sockets': []}])
+        def status(_cfg):
+            value = next(calls)
+            if isinstance(value, Exception):
+                raise value
+            return value
+        with self.assertLogs(app.LOG, level='ERROR'):
+            client, connect, _ = self._run_main([None, None], status)
+        connect.assert_called_once()
+        client.publish.assert_any_call('ace2mqtt/availability', 'offline', qos=1, retain=True)
+        client.publish.assert_any_call('ace2mqtt/availability', 'online', qos=1, retain=True)
+        client.disconnect.assert_called_once()
+
+    def test_publish_cache_skips_unchanged_payloads_until_reset(self):
+        client = Mock()
+        cache = app.PublishCache(client)
+        cache.publish('t', 'a', qos=1, retain=True)
+        cache.publish('t', 'a', qos=1, retain=True)
+        cache.publish('t', 'b', qos=1, retain=True)
+        self.assertEqual(client.publish.call_count, 2)
+        cache.reset()
+        cache.publish('t', 'b', qos=1, retain=True)
+        self.assertEqual(client.publish.call_count, 3)
+
+    def test_discovery_is_published_once_while_nothing_changes(self):
+        client = Mock()
+        cache = app.PublishCache(client)
+        status = {'active_power_w': 1500.0, 'energy_delivered_kwh': 12.5, 'sockets': [{'socket': 2, 'operative': True}]}
+        app.publish_discovery(cache, CFG, status)
+        first = client.publish.call_count
+        app.publish_discovery(cache, CFG, status)
+        self.assertEqual(client.publish.call_count, first)
+        app.publish_discovery(cache, CFG, {**status, 'active_power_w': 2000.0})
+        self.assertEqual(client.publish.call_count, first + 1)
+
+    def test_known_status_fields_get_home_assistant_classes(self):
+        self.assertEqual(app.sensor_metadata('energy_delivered_kwh')['state_class'], 'total_increasing')
+        self.assertEqual(app.sensor_metadata('voltages_v_0')['device_class'], 'voltage')
+        self.assertEqual(app.sensor_metadata('active_power_w')['unit_of_measurement'], 'W')
+        self.assertEqual(app.sensor_metadata('sockets_0_error_code')['entity_category'], 'diagnostic')
+        self.assertEqual(app.sensor_metadata('unknown_field'), {})
+
+    def test_supervisor_mqtt_credentials_are_used_only_for_default_broker(self):
+        data = {'data': {'host': 'broker', 'port': 1883, 'username': 'u', 'password': 'p'}}
+        cfg = {**CFG, 'mqtt_host': 'core-mosquitto', 'mqtt_username': ''}
+        with patch.dict('os.environ', {'SUPERVISOR_TOKEN': 'x'}), patch('app.requests.get') as get:
+            get.return_value.json.return_value = data
+            result = app.supervisor_mqtt(cfg)
+            self.assertEqual((result['mqtt_host'], result['mqtt_username'], result['mqtt_password']), ('broker', 'u', 'p'))
+            get.reset_mock()
+            self.assertEqual(app.supervisor_mqtt({**cfg, 'mqtt_host': 'custom'})['mqtt_host'], 'custom')
+            self.assertEqual(app.supervisor_mqtt({**cfg, 'mqtt_username': 'me'})['mqtt_username'], 'me')
+            get.assert_not_called()
+
+    @patch('app.time.sleep')
+    @patch('app.requests.post')
+    def test_evcc_client_error_is_not_retried(self, post, sleep):
+        response = SimpleNamespace(status_code=404)
+        post.return_value.raise_for_status.side_effect = app.requests.HTTPError('404', response=response)
+        cfg = {**CFG, 'evcc_base_url': 'http://evcc', 'uid_vehicle_map': '{"AA":"car"}'}
+        with self.assertLogs(app.LOG, level='ERROR'):
+            self.assertFalse(app.assign_evcc_vehicle(cfg, 'AA'))
+        post.assert_called_once()
+        sleep.assert_not_called()
 
     def test_property_values_do_not_come_from_ids_or_titles(self):
         for value in (1350, 2000, 4225, 11000):
