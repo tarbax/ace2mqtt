@@ -20,7 +20,7 @@ no charger, broker, Home Assistant instance or evcc server was contacted.
 | evcc assignment | Existing local request tests | Encoded vehicle path, UID mapping, unknown-ID suppression and bounded retries pass; remote API behavior not independently verified |
 | MQTT controls | Local publication tests | Retained commands ignored; failed writes/readbacks do not echo requested value; actual clamped values published |
 
-All six controls refresh on every poll and after their write command. CLI warnings
+All six controls refresh every third poll and directly after their write command. CLI warnings
 on successful commands are surfaced instead of discarded. State names, unique
 IDs and topic paths remain stable. The old button Discovery entries are still
 removed, while their command topics remain accepted for compatibility.
@@ -39,16 +39,16 @@ The upstream tests skip explicitly when alfenctl is not available.
 ## Remaining runtime boundaries
 
 - No physical charger or live Home Assistant/MQTT verification, deployment or publication.
-- Every poll now executes more serialized CLI reads. The configured interval is
-  a delay after completion, not a guaranteed sampling period.
+- Every poll executes serialized CLI reads (control readbacks every third poll).
+  The configured interval is a delay after completion, not a guaranteed sampling period.
 - Failed readback retains the previous known control state and logs a warning.
   Unsupported firmware properties can therefore produce recurring warnings.
 - RFID remains transaction-derived; an older transaction can be the newest
   available while a fresh authorization is not yet recorded. It is not proof
   of the identity of every physical scan, and short authorization states can
   be missed between polls. This existing limitation is not fixed by parser tests.
-- Generic status sensors retain their existing field-based naming and units
-  behavior; missing fields are not a fresh measurement or automatic deletion.
+- Status sensors use a name/icon/class table for the fields alfenctl reports;
+  fields missing for three polls are removed from Discovery.
 - Existing configurations above 64 A or above 11 kW comfort cap must be adjusted
   before startup; the standard 6–32 A and 4 kW defaults remain valid.
 

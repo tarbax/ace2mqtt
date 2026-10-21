@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.0-beta.2
+
+- Documentation rewritten in English; log, error and entity texts are English too.
+- Entities reviewed: readable names (relative to the new "Alfen charger" device, which links to the charger UI), icons, device/state classes, diagnostic categories. Unique IDs are unchanged.
+- New diagnostic sensor "Last successful poll".
+- Entities the charger stops reporting are removed from Discovery after three polls.
+- The RFID scan pulse is no longer retained (a leftover retained value is cleared).
+- Optional evcc password (`evcc_password`) for evcc installations with authentication.
+- Add-on option translations (`translations/en.yaml`); CI runs `ruff check`.
+
 ## 0.2.0-beta.1
 
 - A failing poll no longer rebuilds the MQTT connection or resets the plug-in/RFID session state; the add-on backs off (10–60 s) and publishes `offline` until the charger answers again.

@@ -221,6 +221,82 @@ Random delay  0 s (below the compliant 600 s)
         self.assertEqual(app.sensor_metadata('sockets_0_error_code')['entity_category'], 'diagnostic')
         self.assertEqual(app.sensor_metadata('unknown_field'), {})
 
+    FULL_STATUS = {
+        'sockets': [{'socket': 1, 'state': 'available', 'mode3': 'A (no vehicle)', 'operative': True,
+                     'error_code': 0, 'led': 'green'},
+                    {'socket': 2, 'state': 'charging', 'mode3': 'C2', 'operative': True}],
+        'station_operative': True, 'temperature_c': 31.5, 'max_station_current_a': 32.0,
+        'active_power_w': 1500.0, 'energy_delivered_kwh': 12.5,
+        'voltages_v': [230.0, 231.0, 229.0], 'currents_a': [1.0, 2.0, 3.0],
+    }
+
+    def _discovered(self, status=None):
+        client = Mock()
+        app.publish_discovery(client, CFG, status or self.FULL_STATUS)
+        return {c.args[0]: json.loads(c.args[1]) for c in client.publish.call_args_list
+                if c.args[0].endswith('/config') and c.args[1]}
+
+    def test_every_entity_has_name_icon_or_class_and_stable_unique_id(self):
+        configs = self._discovered()
+        self.assertGreater(len(configs), 20)
+        unique = [c['unique_id'] for c in configs.values()]
+        self.assertEqual(len(unique), len(set(unique)))
+        for topic, config in configs.items():
+            with self.subTest(topic=topic):
+                self.assertTrue(config['has_entity_name'])
+                self.assertTrue(config['name'][0].isupper())
+                self.assertNotIn('_', config['name'])
+                self.assertTrue(config.get('icon') or config.get('device_class'),
+                                'entity needs an icon or device class')
+                self.assertEqual(config['device']['name'], 'Alfen charger')
+                self.assertEqual(config['device']['configuration_url'], 'https://192.0.2.10')
+
+    def test_status_entities_have_friendly_names_and_properties(self):
+        configs = self._discovered()
+        def by_name(name):
+            return next(c for c in configs.values() if c['name'] == name)
+        self.assertEqual(by_name('Socket 2 state')['icon'], 'mdi:ev-plug-type2')
+        self.assertEqual(by_name('Voltage L3')['device_class'], 'voltage')
+        self.assertEqual(by_name('Current L1')['unit_of_measurement'], 'A')
+        self.assertEqual(by_name('Energy delivered')['state_class'], 'total_increasing')
+        self.assertEqual(by_name('Socket 1 LED')['entity_category'], 'diagnostic')
+        self.assertEqual(by_name('Temperature')['unit_of_measurement'], '°C')
+        self.assertNotIn('device_class', by_name('Socket 1 state'))
+        self.assertEqual(by_name('Last successful poll')['device_class'], 'timestamp')
+        self.assertNotIn('availability_topic', by_name('Last successful poll'))
+        self.assertEqual(by_name('Charging current')['device_class'], 'current')
+        self.assertEqual(by_name('Comfort charging power')['unit_of_measurement'], 'kW')
+        self.assertEqual(by_name('Charging mode')['options'], ['off', 'comfort', 'green'])
+        self.assertEqual(by_name('Socket 2 enabled')['device_class'], 'switch')
+
+    def test_unknown_field_gets_readable_fallback_name(self):
+        self.assertEqual(app.describe_field('some_new_field', 1)['name'], 'Some new field')
+
+    def test_vanished_entities_are_removed_after_repeated_absence(self):
+        client = Mock()
+        cache = app.PublishCache(client)
+        app.publish_discovery(cache, CFG, {'temperature_c': 30.0, 'active_power_w': 0.0})
+        client.reset_mock()
+        for _ in range(app.MISSING_POLLS_BEFORE_REMOVAL - 1):
+            app.publish_discovery(cache, CFG, {'active_power_w': 0.0})
+        removed = [c for c in client.publish.call_args_list if c.args[1] == '' and 'temperature_c' in c.args[0]]
+        self.assertEqual(removed, [])
+        app.publish_discovery(cache, CFG, {'active_power_w': 0.0})
+        removed = {c.args[0] for c in client.publish.call_args_list if c.args[1] == '' and 'temperature_c' in c.args[0]}
+        self.assertEqual(removed, {'homeassistant/sensor/ace2mqtt_192_0_2_10/temperature_c/config',
+                                   'ace2mqtt/state/temperature_c'})
+
+    @patch('app.requests.Session')
+    @patch('app.requests.post')
+    def test_evcc_password_logs_in_before_assigning(self, post, session):
+        cfg = {**CFG, 'evcc_base_url': 'http://evcc', 'uid_vehicle_map': '{"AA":"car"}', 'evcc_password': 'secret'}
+        self.assertTrue(app.assign_evcc_vehicle(cfg, 'AA'))
+        post.assert_not_called()
+        calls = session.return_value.post.call_args_list
+        self.assertEqual(calls[0].args[0], 'http://evcc/api/auth/login')
+        self.assertEqual(calls[0].kwargs['json'], {'password': 'secret'})
+        self.assertEqual(calls[1].args[0], 'http://evcc/api/loadpoints/1/vehicle/car')
+
     def test_supervisor_mqtt_credentials_are_used_only_for_default_broker(self):
         data = {'data': {'host': 'broker', 'port': 1883, 'username': 'u', 'password': 'p'}}
         cfg = {**CFG, 'mqtt_host': 'core-mosquitto', 'mqtt_username': ''}
@@ -316,4 +392,4 @@ Random delay  0 s (below the compliant 600 s)
             app._clear_rfid_id_pulse(*first_args)
             client.publish.assert_not_called()
             app._clear_rfid_id_pulse(*second_args)
-            client.publish.assert_called_once_with(topic, '', qos=1, retain=True)
+            client.publish.assert_called_once_with(topic, '', qos=1, retain=False)

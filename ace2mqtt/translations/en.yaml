@@ -1,0 +1,61 @@
+configuration:
+  charger_host:
+    name: Charger host
+    description: Hostname or IP address of the Alfen charger.
+  charger_port:
+    name: Charger port
+    description: Port of the charger's management interface (default 443).
+  charger_username:
+    name: Charger username
+    description: User name for the charger's management interface.
+  charger_password:
+    name: Charger password
+    description: Password for the charger's management interface.
+  charger_http:
+    name: Use HTTP
+    description: Talk to the charger over plain HTTP instead of HTTPS.
+  socket_number:
+    name: Socket number
+    description: Socket that the controls and RFID detection apply to.
+  current_min:
+    name: Minimum charging current (A)
+    description: Lower end of the charging current control.
+  current_max:
+    name: Maximum charging current (A)
+    description: Upper end of the charging current control (at most 64 A).
+  comfort_power_max_kw:
+    name: Maximum Comfort power (kW)
+    description: Upper end of the Comfort power control, 1.35-11 kW in steps of 0.05.
+  poll_interval:
+    name: Poll interval (s)
+    description: Seconds to wait between polls of the charger.
+  mqtt_host:
+    name: MQTT host
+    description: Leave at core-mosquitto with an empty username to use the Mosquitto add-on automatically.
+  mqtt_port:
+    name: MQTT port
+    description: Port of the MQTT broker.
+  mqtt_username:
+    name: MQTT username
+    description: Leave empty to use the Supervisor MQTT service or an anonymous broker.
+  mqtt_password:
+    name: MQTT password
+    description: Password for the MQTT broker.
+  mqtt_topic_prefix:
+    name: MQTT topic prefix
+    description: Prefix for state, control and availability topics. Use a unique prefix per charger.
+  discovery_prefix:
+    name: Discovery prefix
+    description: MQTT Discovery prefix configured in Home Assistant.
+  evcc_base_url:
+    name: evcc base URL
+    description: For example http://evcc:7070. Leave empty to disable the evcc vehicle assignment.
+  evcc_loadpoint_id:
+    name: evcc loadpoint
+    description: Loadpoint number the vehicle is assigned to.
+  evcc_password:
+    name: evcc password
+    description: Only needed when evcc authentication is enabled.
+  uid_vehicle_map:
+    name: RFID to vehicle map
+    description: 'JSON object mapping RFID UIDs to evcc vehicle names, e.g. {"04AABBCCDDEEFF":"my_car"}.'

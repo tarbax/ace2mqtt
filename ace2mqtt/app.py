@@ -43,32 +43,32 @@ def options():
     required = ("charger_host", "mqtt_host", "mqtt_topic_prefix", "discovery_prefix")
     for key in required:
         if not str(cfg.get(key, "")).strip():
-            raise ValueError(f"Instelling '{key}' is verplicht")
+            raise ValueError(f"Option '{key}' is required")
     return cfg
 
 def validate_options(cfg):
     if not 1 <= int(cfg["current_min"]) <= int(cfg["current_max"]) <= 64:
-        raise ValueError("Laadstroomgrenzen moeten 1 <= current_min <= current_max <= 64 A zijn")
+        raise ValueError("Current limits must satisfy 1 <= current_min <= current_max <= 64 A")
     comfort_max = Decimal(str(cfg.get("comfort_power_max_kw", 4.0)))
     if (not comfort_max.is_finite() or not Decimal("1.35") <= comfort_max <= Decimal("11.00")
             or (comfort_max * 1000) % 50):
-        raise ValueError("comfort_power_max_kw moet tussen 1,35 en 11,00 kW liggen in stappen van 0,05")
+        raise ValueError("comfort_power_max_kw must be between 1.35 and 11.00 kW in steps of 0.05")
     for key in ("mqtt_topic_prefix", "discovery_prefix"):
         value = str(cfg[key]).strip("/")
         if not value or any(char in value for char in ("+", "#", " ")):
-            raise ValueError(f"Instelling '{key}' bevat een ongeldig MQTT-topicdeel")
+            raise ValueError(f"Option '{key}' contains an invalid MQTT topic part")
     if str(cfg.get("evcc_base_url", "")).strip():
         if not str(cfg["evcc_base_url"]).strip().startswith(("http://", "https://")):
-            raise ValueError("evcc_base_url moet met http:// of https:// beginnen")
+            raise ValueError("evcc_base_url must start with http:// or https://")
         try:
             if int(cfg.get("evcc_loadpoint_id", 1)) < 1:
                 raise ValueError
         except (TypeError, ValueError):
-            raise ValueError("evcc_loadpoint_id moet een positief geheel getal zijn") from None
+            raise ValueError("evcc_loadpoint_id must be a positive integer") from None
     try:
         uid_vehicle_map(cfg)
     except (TypeError, json.JSONDecodeError) as exc:
-        raise ValueError("uid_vehicle_map moet een JSON-object met UID-voertuignaamparen zijn") from exc
+        raise ValueError("uid_vehicle_map must be a JSON object of UID to vehicle name pairs") from exc
 
 def toml_string(value):
     return json.dumps(str(value), ensure_ascii=False)
@@ -112,7 +112,7 @@ def run_status(cfg):
     try:
         return json.loads(run_alfen(cfg, "status", "--json", timeout=20))
     except json.JSONDecodeError as exc:
-        raise RuntimeError(f"alfenctl gaf geen geldige JSON-status: {exc}") from exc
+        raise RuntimeError(f"alfenctl returned invalid JSON status: {exc}") from exc
 
 class PublishCache:
     """Publish wrapper that skips payloads identical to the last one sent.
@@ -123,6 +123,7 @@ class PublishCache:
     def __init__(self, client):
         self.client = client
         self.sent = {}
+        self.known_entities = {}
 
     def publish(self, topic, payload, qos=0, retain=False):
         if self.sent.get(topic) == payload:
@@ -141,7 +142,7 @@ def publish_config(client, cfg, component, device_id, key, config):
     topic = f"{cfg['discovery_prefix'].strip('/')}/{component}/{device_id}/{key}/config"
     client.publish(topic, json.dumps(config, ensure_ascii=False), qos=1, retain=True)
 
-def discovery_switch(client, cfg, device_id, device, key, name):
+def discovery_switch(client, cfg, device_id, device, key, name, icon):
     root = cfg["mqtt_topic_prefix"].strip("/")
     config = {
         "name": name,
@@ -150,8 +151,8 @@ def discovery_switch(client, cfg, device_id, device, key, name):
         "state_topic": f"{root}/state/{key}",
         "payload_on": "ON", "payload_off": "OFF",
         "state_on": "ON", "state_off": "OFF",
-        "optimistic": False, "retain": False, "device": device,
-        **availability_fields(root),
+        "optimistic": False, "retain": False, "device": device, "device_class": "switch",
+        "icon": icon, "has_entity_name": True, **availability_fields(root),
     }
     publish_config(client, cfg, "switch", device_id, key, config)
 
@@ -171,37 +172,44 @@ def publish_control_discovery(client, cfg, device_id, device):
     socket = int(cfg["socket_number"])
     root = cfg["mqtt_topic_prefix"].strip("/")
     avail = availability_fields(root)
-    for key, name in (("socket", f"Socket {socket}"),
-                      ("charging_profile_override", "Laadprofieloverride")):
-        discovery_switch(client, cfg, device_id, device, key, name)
+    for key, name, icon in (("socket", f"Socket {socket} enabled", "mdi:ev-plug-type2"),
+                            ("charging_profile_override", "Charging profile override",
+                             "mdi:lightning-bolt-circle")):
+        discovery_switch(client, cfg, device_id, device, key, name, icon)
     # Remove the previous button entities from MQTT Discovery.
     discovery_prefix = cfg["discovery_prefix"].strip("/")
     for key in ("socket_enable", "socket_disable", "direct_start_on", "direct_start_off"):
         client.publish(f"{discovery_prefix}/button/{device_id}/{key}/config", "", qos=1, retain=True)
-    for key, name, icon in (("rfid_id", "Laatste RFID-ID", "mdi:card-account-details"),
-                            ("rfid_id_pulse", "RFID-ID", "mdi:card-account-details-outline")):
+    # Earlier versions retained the short-lived pulse; clear any leftover value.
+    client.publish(f"{root}/state/rfid_id_pulse", "", qos=1, retain=True)
+    for key, name, icon in (("rfid_id", "Last RFID card", "mdi:card-account-details"),
+                            ("rfid_id_pulse", "RFID card scan", "mdi:card-account-details-outline")):
         publish_config(client, cfg, "sensor", device_id, key, {
             "name": name, "unique_id": f"{device_id}_{key}", "state_topic": f"{root}/state/{key}",
-            "icon": icon, "device": device, **avail})
+            "icon": icon, "has_entity_name": True, "device": device, **avail})
     current_min, current_max = effective_current_bounds(cfg)
     publish_config(client, cfg, "number", device_id, "current_limit", {
-        "name": f"Laadstroom socket {socket}", "unique_id": f"{device_id}_current_limit",
+        "name": "Charging current", "unique_id": f"{device_id}_current_limit",
+        "device_class": "current", "icon": "mdi:current-ac", "has_entity_name": True,
         "command_topic": f"{root}/control/current", "state_topic": f"{root}/state/current_limit",
         "min": current_min, "max": current_max, "step": 1, "unit_of_measurement": "A",
         "mode": "slider", "optimistic": False, "retain": False, "device": device, **avail})
     publish_config(client, cfg, "number", device_id, "comfort_power", {
-        "name": "Comfort laadvermogen", "unique_id": f"{device_id}_comfort_power",
+        "name": "Comfort charging power", "unique_id": f"{device_id}_comfort_power",
+        "device_class": "power", "icon": "mdi:solar-power", "has_entity_name": True,
         "command_topic": f"{root}/control/comfort_power", "state_topic": f"{root}/state/comfort_power",
         "min": 1.35, "max": float(Decimal(str(cfg.get("comfort_power_max_kw", 4.0)))), "step": 0.05,
         "unit_of_measurement": "kW", "mode": "slider",
         "optimistic": False, "retain": False, "device": device, **avail})
     publish_config(client, cfg, "number", device_id, "green_share", {
         "name": "Green share", "unique_id": f"{device_id}_green_share",
+        "icon": "mdi:leaf", "has_entity_name": True,
         "command_topic": f"{root}/control/green_share", "state_topic": f"{root}/state/green_share",
         "min": 0, "max": 100, "step": 1, "unit_of_measurement": "%", "mode": "slider",
         "optimistic": False, "retain": False, "device": device, **avail})
     publish_config(client, cfg, "select", device_id, "solar_mode", {
-        "name": "Laadmodus", "unique_id": f"{device_id}_solar_mode",
+        "name": "Charging mode", "unique_id": f"{device_id}_solar_mode",
+        "icon": "mdi:solar-power-variant", "has_entity_name": True,
         "command_topic": f"{root}/control/solar_mode", "state_topic": f"{root}/state/solar_mode",
         "options": list(SOLAR_MODE_VALUES), "optimistic": False, "retain": False,
         "device": device, **avail})
@@ -210,7 +218,7 @@ def handle_command(cfg, topic, payload, retained=False):
     """Translate a small fixed command set to alfenctl; never accept shell text."""
     root = cfg["mqtt_topic_prefix"].strip("/")
     if retained:
-        LOG.warning("Retained MQTT-bedieningsbericht genegeerd")
+        LOG.warning("Ignored retained MQTT control message")
         return
     socket = str(int(cfg["socket_number"]))
     fixed = {
@@ -234,70 +242,70 @@ def handle_command(cfg, topic, payload, retained=False):
     if topic in switch_commands:
         command = switch_commands[topic].get(payload.strip().upper())
         if command is None:
-            LOG.warning("Ongeldige schakelaarwaarde voor %s", topic)
+            LOG.warning("Invalid switch payload for %s", topic)
             return
         run_alfen(cfg, *command[0])
-        LOG.info("Alfen-schakelaar %s ingesteld op %s", topic.rsplit("/", 1)[-1], command[1])
+        LOG.info("Alfen switch %s set to %s", topic.rsplit("/", 1)[-1], command[1])
         return command[1]
     if topic in fixed:
         if payload != "PRESS":
-            LOG.warning("Ongeldige payload voor bedieningsknop %s", topic)
+            LOG.warning("Invalid payload for control button %s", topic)
             return
         run_alfen(cfg, *fixed[topic])
-        LOG.info("Alfen-bedieningscommando uitgevoerd: %s", topic.rsplit("/", 1)[-1])
+        LOG.info("Alfen control command executed: %s", topic.rsplit("/", 1)[-1])
         return
     if topic == f"{root}/control/current":
         try:
             numeric_amps = float(payload)
         except ValueError:
-            LOG.warning("Ongeldige laadstroomwaarde ontvangen")
+            LOG.warning("Invalid charging current received")
             return
         if not math.isfinite(numeric_amps) or not numeric_amps.is_integer():
-            LOG.warning("Laadstroom moet een geheel aantal ampere zijn")
+            LOG.warning("Charging current must be a whole number of amperes")
             return
         amps = int(numeric_amps)
         current_min, current_max = effective_current_bounds(cfg)
         current_min = max(1, current_min)
         if not current_min <= amps <= current_max:
-            LOG.warning("Laadstroom buiten ingestelde grens (%s-%s A)", current_min, current_max)
+            LOG.warning("Charging current outside configured limits (%s-%s A)", current_min, current_max)
             return
         run_alfen(cfg, "current", "set", str(amps), "--socket", socket)
-        LOG.info("Laadstroominstelling voor socket %s bijgewerkt", socket)
+        LOG.info("Charging current for socket %s updated", socket)
         return str(amps)
     if topic == f"{root}/control/comfort_power":
         try:
             kw = Decimal(payload.strip())
         except (InvalidOperation, ValueError):
-            LOG.warning("Ongeldig comfortvermogen ontvangen")
+            LOG.warning("Invalid comfort power received")
             return
         comfort_max = Decimal(str(cfg.get("comfort_power_max_kw", 4.0)))
         if not kw.is_finite() or kw < Decimal("1.35") or kw > comfort_max or (kw * 1000) % 50:
-            LOG.warning("Comfortvermogen moet 1,35-%s kW zijn in stappen van 0,05 kW", comfort_max)
+            LOG.warning("Comfort power must be 1.35-%s kW in steps of 0.05 kW", comfort_max)
             return
         watts = int(kw * 1000)
         run_alfen(cfg, "lb", "set", "--comfort-level", str(watts))
-        LOG.info("Comfortvermogen ingesteld op %s kW", kw)
+        LOG.info("Comfort power set to %s kW", kw)
         return format(kw.normalize(), "f")
     if topic == f"{root}/control/green_share":
         try:
             percent = Decimal(payload.strip())
         except (InvalidOperation, ValueError):
-            LOG.warning("Ongeldig green-sharepercentage ontvangen")
+            LOG.warning("Invalid green share received")
             return
         if not percent.is_finite() or percent < 0 or percent > 100 or not percent == percent.to_integral_value():
-            LOG.warning("Green share moet een geheel percentage van 0 tot 100 zijn")
+            LOG.warning("Green share must be a whole percentage from 0 to 100")
             return
         value = int(percent)
         run_alfen(cfg, "lb", "set", "--green-share", str(value))
-        LOG.info("Green share ingesteld op %s%%", value)
+        LOG.info("Green share set to %s%%", value)
         return str(value)
     if topic == f"{root}/control/solar_mode":
         mode = payload.strip().lower()
         if mode not in SOLAR_MODE_VALUES:
-            LOG.warning("Ongeldige laadmodus ontvangen; toegestaan: off, comfort of green")
+            LOG.warning("Invalid charging mode received; allowed: off, comfort or green")
             return
         run_alfen(cfg, "lb", "set", "--solar-mode", SOLAR_MODE_VALUES[mode])
-        LOG.info("Alfen-laadmodus ingesteld op %s", mode)
+        LOG.info("Alfen charging mode set to %s", mode)
         return mode
     LOG.debug("Onbekend MQTT-commando genegeerd")
 
@@ -337,7 +345,7 @@ def on_message(client, cfg, message):
                 elif name in ("direct_start_on", "direct_start_off"):
                     publish_override_readback(client, cfg)
     except Exception as exc:
-        LOG.error("Bedieningscommando mislukt: %s", exc)
+        LOG.error("Control command failed: %s", exc)
 
 def flatten(obj, prefix=""):
     """Flatten status objects while retaining field names for stable entity IDs."""
@@ -383,29 +391,114 @@ def connect_mqtt(cfg):
     client.loop_start()
     return client
 
-SENSOR_METADATA = (
-    (r"temperature_c", {"device_class": "temperature", "unit_of_measurement": "°C",
-                        "state_class": "measurement"}),
-    (r"currents_a_\d+", {"device_class": "current", "unit_of_measurement": "A",
-                         "state_class": "measurement"}),
-    (r"voltages_v_\d+", {"device_class": "voltage", "unit_of_measurement": "V",
-                         "state_class": "measurement"}),
-    (r"active_power_w", {"device_class": "power", "unit_of_measurement": "W",
-                         "state_class": "measurement"}),
-    (r"energy_(delivered|consumed)_kwh", {"device_class": "energy", "unit_of_measurement": "kWh",
-                                          "state_class": "total_increasing"}),
-    (r"(max_station|max_installation|active_safe)_current_a",
-     {"device_class": "current", "unit_of_measurement": "A", "entity_category": "diagnostic"}),
-    (r"sockets_\d+_(mode3|led|power|error|error_code|error_severity)",
-     {"entity_category": "diagnostic"}),
+# (key pattern, entity name, properties). Names may use {socket} (the charger's
+# socket number) and {phase} (1-based index of a voltage/current list entry).
+NUMERIC_PROPS = ("device_class", "unit_of_measurement", "state_class")
+FIELD_SPECS = (
+    (r"temperature_c", "Temperature", {"device_class": "temperature", "unit_of_measurement": "°C",
+                                       "state_class": "measurement"}),
+    (r"active_power_w", "Active power", {"device_class": "power", "unit_of_measurement": "W",
+                                         "state_class": "measurement"}),
+    (r"energy_delivered_kwh", "Energy delivered", {"device_class": "energy", "unit_of_measurement": "kWh",
+                                                   "state_class": "total_increasing"}),
+    (r"energy_consumed_kwh", "Energy consumed", {"device_class": "energy", "unit_of_measurement": "kWh",
+                                                 "state_class": "total_increasing"}),
+    (r"voltages_v_(?P<idx>\d+)", "Voltage L{phase}", {"device_class": "voltage", "unit_of_measurement": "V",
+                                                      "state_class": "measurement"}),
+    (r"currents_a_(?P<idx>\d+)", "Current L{phase}", {"device_class": "current", "unit_of_measurement": "A",
+                                                      "state_class": "measurement"}),
+    (r"max_station_current_a", "Maximum station current",
+     {"device_class": "current", "unit_of_measurement": "A", "icon": "mdi:current-ac",
+      "entity_category": "diagnostic"}),
+    (r"max_installation_current_a", "Maximum installation current",
+     {"device_class": "current", "unit_of_measurement": "A", "icon": "mdi:current-ac",
+      "entity_category": "diagnostic"}),
+    (r"active_safe_current_a", "Safe current limit",
+     {"device_class": "current", "unit_of_measurement": "A", "icon": "mdi:shield-alert-outline",
+      "entity_category": "diagnostic"}),
+    (r"station_operative", "Station operative", {"icon": "mdi:ev-station"}),
+    (r"sockets_(?P<idx>\d+)_state", "Socket {socket} state", {"icon": "mdi:ev-plug-type2"}),
+    (r"sockets_(?P<idx>\d+)_mode3", "Socket {socket} vehicle state", {"icon": "mdi:car-electric"}),
+    (r"sockets_(?P<idx>\d+)_operative", "Socket {socket} operative", {"icon": "mdi:check-circle-outline"}),
+    (r"sockets_(?P<idx>\d+)_display", "Socket {socket} display",
+     {"icon": "mdi:monitor", "entity_category": "diagnostic"}),
+    (r"sockets_(?P<idx>\d+)_led", "Socket {socket} LED",
+     {"icon": "mdi:led-on", "entity_category": "diagnostic"}),
+    (r"sockets_(?P<idx>\d+)_power", "Socket {socket} power state",
+     {"icon": "mdi:flash", "entity_category": "diagnostic"}),
+    (r"sockets_(?P<idx>\d+)_error_code", "Socket {socket} error code",
+     {"icon": "mdi:alert-circle-outline", "entity_category": "diagnostic"}),
+    (r"sockets_(?P<idx>\d+)_error", "Socket {socket} error",
+     {"icon": "mdi:alert-circle", "entity_category": "diagnostic"}),
+    (r"sockets_(?P<idx>\d+)_error_severity", "Socket {socket} error severity",
+     {"icon": "mdi:alert-octagon-outline", "entity_category": "diagnostic"}),
+    (r"sockets_(?P<idx>\d+)_socket", "Socket {socket} number",
+     {"icon": "mdi:numeric", "entity_category": "diagnostic", "enabled_by_default": False}),
 )
 
-def sensor_metadata(key):
-    """Home Assistant classes for known alfenctl status fields (Energy dashboard etc.)."""
-    for pattern, metadata in SENSOR_METADATA:
-        if re.fullmatch(pattern, key):
-            return dict(metadata)
-    return {}
+def socket_number_at(state, index):
+    """The charger's own number for the socket at this list position."""
+    try:
+        return int(state["sockets"][index]["socket"])
+    except (TypeError, KeyError, IndexError, ValueError):
+        return index + 1
+
+def describe_field(key, value, state=None):
+    """Name, icon, units and classes Home Assistant needs for one flattened status field."""
+    for pattern, name, props in FIELD_SPECS:
+        match = re.fullmatch(pattern, key)
+        if not match:
+            continue
+        index = int(match.groupdict().get("idx") or 0)
+        config = {"name": name.format(socket=socket_number_at(state, index), phase=index + 1)}
+        numeric = isinstance(value, (int, float)) and not isinstance(value, bool)
+        config.update({k: v for k, v in props.items() if numeric or k not in NUMERIC_PROPS})
+        return config
+    words = key.replace("_", " ").strip()
+    return {"name": words[:1].upper() + words[1:]}
+
+def sensor_metadata(key, value=1.0, state=None):
+    """Everything describe_field returns except the name."""
+    config = describe_field(key, value, state)
+    config.pop("name")
+    return config
+
+def device_info(cfg, device_id):
+    scheme = "http" if cfg.get("charger_http") else "https"
+    return {"identifiers": [device_id], "name": "Alfen charger", "manufacturer": "Alfen",
+            "model": "Alfen EV charger", "configuration_url": f"{scheme}://{cfg['charger_host']}"}
+
+def publish_poll_diagnostics(client, cfg, device_id, device):
+    """Timestamp sensor that deliberately has no availability, so it keeps its last value."""
+    root = cfg["mqtt_topic_prefix"].strip("/")
+    publish_config(client, cfg, "sensor", device_id, "last_poll", {
+        "name": "Last successful poll", "unique_id": f"{device_id}_last_poll",
+        "state_topic": f"{root}/state/last_poll", "device_class": "timestamp",
+        "entity_category": "diagnostic", "icon": "mdi:clock-check-outline",
+        "has_entity_name": True, "device": device})
+
+MISSING_POLLS_BEFORE_REMOVAL = 3
+
+def forget_vanished_entities(client, cfg, device_id, current):
+    """Remove discovery and state of fields the charger stopped reporting for a while."""
+    known = getattr(client, "known_entities", None)
+    if not isinstance(known, dict):
+        return
+    for entity in current:
+        known[entity] = 0
+    prefix = cfg["discovery_prefix"].strip("/")
+    root = cfg["mqtt_topic_prefix"].strip("/")
+    for entity in [e for e in known if e not in current]:
+        known[entity] += 1
+        if known[entity] < MISSING_POLLS_BEFORE_REMOVAL:
+            continue
+        component, name = entity
+        client.publish(f"{prefix}/{component}/{device_id}/{name}/config", "", qos=1, retain=True)
+        client.publish(f"{root}/state/{name}", "", qos=1, retain=True)
+        client.sent.pop(f"{prefix}/{component}/{device_id}/{name}/config", None)
+        client.sent.pop(f"{root}/state/{name}", None)
+        del known[entity]
+        LOG.info("Removed entity %s that is no longer reported by the charger", name)
 
 def publish_discovery(client, cfg, state):
     root = cfg["mqtt_topic_prefix"].strip("/")
@@ -419,34 +512,33 @@ def publish_discovery(client, cfg, state):
     else:
         cfg.pop("_station_max_current_a", None)
     device_id = "ace2mqtt_" + clean_id(cfg["charger_host"])
-    device = {"identifiers": [device_id], "name": "Alfen laadpaal", "manufacturer": "Alfen",
-              "model": "Alfen EV charger"}
+    device = device_info(cfg, device_id)
     publish_control_discovery(client, cfg, device_id, device)
+    publish_poll_diagnostics(client, cfg, device_id, device)
+    current = set()
     for key, value in flatten(state).items():
+        if value is None:
+            continue
         entity = clean_id(key)
         state_topic = f"{root}/state/{entity}"
-        component = "sensor"
-        config = {"name": key.replace("_", " ").title(), "unique_id": f"{device_id}_{entity}",
-                  "state_topic": state_topic, "device": device, "availability_topic": f"{root}/availability",
-                  "payload_available": "online", "payload_not_available": "offline"}
-        if isinstance(value, bool):
-            component = "binary_sensor"
+        component = "binary_sensor" if isinstance(value, bool) else "sensor"
+        config = {"unique_id": f"{device_id}_{entity}", "state_topic": state_topic, "has_entity_name": True,
+                  "device": device, **availability_fields(root)}
+        config.update(describe_field(key, value, state))
+        if component == "binary_sensor":
             config.update({"payload_on": "true", "payload_off": "false"})
-        elif isinstance(value, (int, float)):
-            config.update(sensor_metadata(key))
-            if isinstance(value, float):
-                config["suggested_display_precision"] = 2
-        if value is None or isinstance(value, (dict, list)):
-            continue
-        topic = f"{cfg['discovery_prefix'].strip('/')}/{component}/{device_id}/{entity}/config"
-        client.publish(topic, json.dumps(config, ensure_ascii=False), qos=1, retain=True)
+        elif isinstance(value, float):
+            config["suggested_display_precision"] = 2
+        publish_config(client, cfg, component, device_id, entity, config)
         if isinstance(value, bool):
             payload = str(value).lower()
-        elif isinstance(value, (int, float)):
-            payload = f"{value:.2f}" if isinstance(value, float) else str(value)
+        elif isinstance(value, float):
+            payload = f"{value:.2f}"
         else:
             payload = str(value)
         client.publish(state_topic, payload, qos=1, retain=True)
+        current.add((component, entity))
+    forget_vanished_entities(client, cfg, device_id, current)
 
 def parse_current_limit(output, socket_number):
     """Read one socket's configured limit from alfenctl's documented current view."""
@@ -465,13 +557,13 @@ def publish_current_readback(client, cfg):
             output = run_alfen(cfg, "current", timeout=20)
             value = parse_current_limit(output, cfg["socket_number"])
             if value is None:
-                LOG.warning("Kon de ingestelde laadstroom voor socket %s niet uit alfenctl lezen", cfg["socket_number"])
+                LOG.warning("Could not read the charging current of socket %s from alfenctl", cfg["socket_number"])
                 return False
             root = cfg["mqtt_topic_prefix"].strip("/")
             client.publish(f"{root}/state/current_limit", value, qos=1, retain=True)
             return True
     except Exception as exc:
-        LOG.warning("Laadstroom teruglezen mislukt: %s", exc)
+        LOG.warning("Reading back charging current failed: %s", exc)
         return False
 
 def parse_solar_mode(output):
@@ -485,13 +577,13 @@ def publish_solar_mode_readback(client, cfg):
             output = run_alfen(cfg, "lb", timeout=20)
             mode = parse_solar_mode(output)
             if mode is None:
-                LOG.warning("Kon de laadmodus niet uit alfenctl lezen")
+                LOG.warning("Could not read the charging mode from alfenctl")
                 return False
             root = cfg["mqtt_topic_prefix"].strip("/")
             client.publish(f"{root}/state/solar_mode", mode, qos=1, retain=True)
             return True
     except Exception as exc:
-        LOG.warning("Laadmodus teruglezen mislukt: %s", exc)
+        LOG.warning("Reading back charging mode failed: %s", exc)
         return False
 
 def parse_property_number(output, property_id):
@@ -533,12 +625,12 @@ def publish_switch_readback(client, cfg, override=False):
         with ALFEN_LOCK:
             value = parse_socket_state(run_alfen(cfg, *command, timeout=20), cfg["socket_number"], override)
             if value is None:
-                LOG.warning("Kon %s niet uit alfenctl lezen", name)
+                LOG.warning("Could not read %s from alfenctl", name)
                 return False
             client.publish(f"{cfg['mqtt_topic_prefix'].strip('/')}/state/{name}", value, qos=1, retain=True)
             return True
     except Exception as exc:
-        LOG.warning("%s teruglezen mislukt: %s", name, exc)
+        LOG.warning("Reading back %s failed: %s", name, exc)
         return False
 
 
@@ -640,7 +732,7 @@ def _clear_rfid_id_pulse(client, state_topic, timer):
         if active is None or active[0] is not timer:
             return
         del RFID_PULSE_TIMERS[state_topic]
-        client.publish(state_topic, "", qos=1, retain=True)
+        client.publish(state_topic, "", qos=1, retain=False)
 
 def publish_rfid_id_pulse(client, cfg, tag):
     """Publish a short-lived RFID ID and clear it two seconds later."""
@@ -649,7 +741,7 @@ def publish_rfid_id_pulse(client, cfg, tag):
         previous = RFID_PULSE_TIMERS.pop(state_topic, None)
         if previous is not None:
             previous[1].cancel()
-        client.publish(state_topic, tag, qos=1, retain=True)
+        client.publish(state_topic, tag, qos=1, retain=False)
         token = object()
         timer = threading.Timer(2.0, _clear_rfid_id_pulse, args=(client, state_topic, token))
         timer.daemon = True
@@ -682,34 +774,42 @@ def assign_evcc_vehicle(cfg, tag):
     uid = normalise_uid(tag)
     vehicle = uid_vehicle_map(cfg).get(uid)
     if not vehicle:
-        LOG.info("RFID-ID heeft geen evcc-voertuigkoppeling")
+        LOG.info("RFID ID has no evcc vehicle mapping")
         return False
 
     loadpoint = int(cfg.get("evcc_loadpoint_id", 1))
+    password = str(cfg.get("evcc_password") or "")
     path = f"/api/loadpoints/{loadpoint}/vehicle/{quote(vehicle, safe='')}"
     url = f"{base_url}{path}"
     for attempt, delay in enumerate((0,) + EVCC_RETRY_DELAYS):
         if delay:
             time.sleep(delay)
         try:
-            response = requests.post(url, timeout=10)
+            if password:
+                # evcc with authentication enabled hands out a session cookie on login.
+                session = requests.Session()
+                session.post(f"{base_url}/api/auth/login", json={"password": password},
+                             timeout=10).raise_for_status()
+                response = session.post(url, timeout=10)
+            else:
+                response = requests.post(url, timeout=10)
             response.raise_for_status()
-            LOG.info("evcc-laadpunt %s ingesteld op voertuig %s", loadpoint, vehicle)
+            LOG.info("evcc loadpoint %s set to vehicle %s", loadpoint, vehicle)
             return True
         except requests.HTTPError as exc:
             status_code = exc.response.status_code if exc.response is not None else 0
             if 400 <= status_code < 500 and status_code != 429:
-                LOG.error("evcc wees de aanroep af (HTTP %s); controleer voertuignaam en laadpunt", status_code)
+                LOG.error("evcc rejected the request (HTTP %s); check vehicle name and loadpoint", status_code)
                 return False
             if attempt < len(EVCC_RETRY_DELAYS):
-                LOG.warning("evcc-aanroep mislukt: %s (opnieuw proberen)", exc)
+                LOG.warning("evcc request failed: %s (retrying)", exc)
             else:
-                LOG.error("evcc-aanroep mislukt; retries opgebruikt: %s", exc)
+                LOG.error("evcc request failed; retries exhausted: %s", exc)
         except Exception as exc:
             if attempt < len(EVCC_RETRY_DELAYS):
-                LOG.warning("evcc-aanroep mislukt: %s (opnieuw proberen)", exc)
+                LOG.warning("evcc request failed: %s (retrying)", exc)
             else:
-                LOG.error("evcc-aanroep mislukt; retries opgebruikt: %s", exc)
+                LOG.error("evcc request failed; retries exhausted: %s", exc)
     return False
 
 def publish_latest_rfid_id(client, cfg, connected_at=None, baseline_offset=None):
@@ -721,15 +821,15 @@ def publish_latest_rfid_id(client, cfg, connected_at=None, baseline_offset=None)
             tag = (session_rfid_id(output, cfg["socket_number"], connected_at, baseline_offset)
                    if connected_at else parse_latest_rfid_id(output, cfg["socket_number"]))
     except Exception as exc:
-        LOG.warning("RFID-ID uitlezen mislukt: %s", exc)
+        LOG.warning("Reading RFID ID failed: %s", exc)
         return False
     if tag is None:
-        LOG.info("Geen RFID-ID gevonden in de laadtransacties")
+        LOG.info("No RFID ID found in the charging transactions")
         return False
     root = cfg["mqtt_topic_prefix"].strip("/")
     client.publish(f"{root}/state/rfid_id", tag, qos=1, retain=True)
     publish_rfid_id_pulse(client, cfg, tag)
-    LOG.info("RFID-ID van de geautoriseerde laadpas gepubliceerd")
+    LOG.info("Published RFID ID of the authorised card")
     assign_evcc_vehicle(cfg, tag)
     return True
 
@@ -742,7 +842,7 @@ def read_transaction_offset(cfg):
         offset = latest_transaction_offset(output, cfg["socket_number"])
         return offset if offset is not None else -1
     except Exception as exc:
-        LOG.warning("RFID-transactiebasis uitlezen mislukt: %s", exc)
+        LOG.warning("Reading RFID transaction baseline failed: %s", exc)
         return None
 
 def publish_comfort_power_readback(client, cfg):
@@ -751,13 +851,13 @@ def publish_comfort_power_readback(client, cfg):
             output = run_alfen(cfg, "get", "3280_3", timeout=20)
             value = parse_comfort_power(output)
             if value is None:
-                LOG.warning("Kon het comfortvermogen niet uit alfenctl lezen")
+                LOG.warning("Could not read the comfort power from alfenctl")
                 return False
             root = cfg["mqtt_topic_prefix"].strip("/")
             client.publish(f"{root}/state/comfort_power", value, qos=1, retain=True)
             return True
     except Exception as exc:
-        LOG.warning("Comfortvermogen teruglezen mislukt: %s", exc)
+        LOG.warning("Reading back comfort power failed: %s", exc)
         return False
 
 def parse_green_share(output):
@@ -774,13 +874,13 @@ def publish_green_share_readback(client, cfg):
             output = run_alfen(cfg, "get", "3280_2", timeout=20)
             value = parse_green_share(output)
             if value is None:
-                LOG.warning("Kon het green-sharepercentage niet uit alfenctl lezen")
+                LOG.warning("Could not read the green share from alfenctl")
                 return False
             root = cfg["mqtt_topic_prefix"].strip("/")
             client.publish(f"{root}/state/green_share", value, qos=1, retain=True)
             return True
     except Exception as exc:
-        LOG.warning("Green share teruglezen mislukt: %s", exc)
+        LOG.warning("Reading back green share failed: %s", exc)
         return False
 
 def supervisor_mqtt(cfg):
@@ -793,11 +893,11 @@ def supervisor_mqtt(cfg):
                                 headers={"Authorization": f"Bearer {token}"})
         response.raise_for_status()
         data = response.json()["data"]
-        LOG.info("MQTT-gegevens opgehaald via de Supervisor")
+        LOG.info("MQTT credentials obtained from the Supervisor")
         return {**cfg, "mqtt_host": data["host"], "mqtt_port": data["port"],
                 "mqtt_username": data.get("username", ""), "mqtt_password": data.get("password", "")}
     except Exception as exc:
-        LOG.warning("MQTT-service van Supervisor niet beschikbaar (%s); instellingen worden gebruikt", exc)
+        LOG.warning("Supervisor MQTT service unavailable (%s); using configured settings", exc)
         return cfg
 
 class PollState:
@@ -840,6 +940,8 @@ def poll_once(client, cfg, poll):
         publish_socket_readback(client, cfg)
         publish_override_readback(client, cfg)
     poll.polls += 1
+    client.publish(f"{cfg['mqtt_topic_prefix'].strip('/')}/state/last_poll",
+                   datetime.now().astimezone().isoformat(timespec="seconds"), qos=1, retain=True)
     client.publish(f"{cfg['mqtt_topic_prefix'].strip('/')}/availability", "online", qos=1, retain=True)
 
 def publish_offline(client, cfg):
@@ -867,15 +969,15 @@ def main():
         try:
             if client is None:
                 client = connect_mqtt(cfg)
-                LOG.info("Verbonden met MQTT; Alfen status wordt opgehaald van %s", cfg["charger_host"])
+                LOG.info("Connected to MQTT; polling Alfen status from %s", cfg["charger_host"])
             poll_once(client, cfg, poll)
             if failures:
-                LOG.info("Uitlezen hersteld")
+                LOG.info("Polling recovered")
             failures = 0
             delay = int(cfg["poll_interval"])
         except Exception as exc:
             failures += 1
-            LOG.error("Uitlezen/publiceren mislukt: %s", exc)
+            LOG.error("Polling/publishing failed: %s", exc)
             if client:
                 publish_offline(client, cfg)
             # Keep MQTT and the session state; only back off from the failing side.
