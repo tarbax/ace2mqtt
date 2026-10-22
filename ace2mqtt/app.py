@@ -31,7 +31,10 @@ STOP = threading.Event()
 # example from the Alfen app) are picked up every Nth poll, own writes at once.
 CONTROL_POLL_EVERY = 3
 RFID_RETRY_SECONDS = 15
-MAX_BACKOFF_SECONDS = 60
+MAX_BACKOFF_SECONDS = 30
+# alfenctl repeats the same warning on every call; log each distinct one once per hour.
+WARNING_REPEAT_SECONDS = 3600
+WARNING_LAST_LOGGED = {}
 
 def clean_id(value):
     return re.sub(r"[^a-z0-9_]+", "_", value.lower()).strip("_") or "value"
@@ -52,17 +55,20 @@ NESTED = {
     "evcc_password": ("evcc", "password"),
 }
 LEGACY_KEYS = (*NESTED, "uid_vehicle_map")
+# Options that only exist in the grouped layout (no legacy flat key).
+OPTION_MAP = {**NESTED, "offline_after": ("limits", "offline_after")}
 OPTIONAL_KEYS = ("charger_port", "mqtt_username", "mqtt_password", "evcc_base_url", "evcc_password")
 DEFAULTS = {
     "charger_username": "admin", "charger_password": "", "charger_http": False, "socket_number": 1,
     "mqtt_host": "core-mosquitto", "mqtt_port": 1883, "mqtt_username": "", "mqtt_password": "",
     "mqtt_topic_prefix": "ace2mqtt", "discovery_prefix": "homeassistant",
     "current_min": 6, "current_max": 32, "comfort_power_max_kw": 4.0, "poll_interval": 10,
+    "offline_after": 300,
     "evcc_base_url": "", "evcc_loadpoint_id": 1, "evcc_password": "",
 }
 
 def option_label(key):
-    section, name = NESTED.get(key, (None, key))
+    section, name = OPTION_MAP.get(key, (None, key))
     return f"{section}.{name}" if section else name
 
 def normalize_options(raw):
@@ -72,7 +78,7 @@ def normalize_options(raw):
     """
     migrated = any(key in raw for key in LEGACY_KEYS)
     cfg = {}
-    for key, (section, name) in NESTED.items():
+    for key, (section, name) in OPTION_MAP.items():
         value = (raw.get(section) or {}).get(name)
         if migrated and raw.get(key) is not None:
             value = raw[key]
@@ -103,7 +109,7 @@ def normalize_options(raw):
 def grouped_options(cfg, raw):
     """The grouped options structure for a flat config, as stored by the Supervisor."""
     grouped = {"charger": {}, "mqtt": {}, "limits": {}, "evcc": {}}
-    for key, (section, name) in NESTED.items():
+    for key, (section, name) in OPTION_MAP.items():
         value = cfg[key]
         if key in OPTIONAL_KEYS and (value == "" or (
                 key == "charger_port" and value == (80 if cfg["charger_http"] else 443))):
@@ -144,6 +150,11 @@ def options():
 def validate_options(cfg):
     if not 1 <= int(cfg["current_min"]) <= int(cfg["current_max"]) <= 64:
         raise ValueError("limits.current_min/current_max must satisfy 1 <= current_min <= current_max <= 64 A")
+    try:
+        if int(cfg.get("offline_after", 300)) < 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        raise ValueError("limits.offline_after must be a non-negative number of seconds") from None
     comfort_max = Decimal(str(cfg.get("comfort_power_max_kw", 4.0)))
     if (not comfort_max.is_finite() or not Decimal("1.35") <= comfort_max <= Decimal("11.00")
             or (comfort_max * 1000) % 50):
@@ -191,6 +202,16 @@ def alfen_command(cfg, *args):
     return ["alfenctl", *args, "--config", "/data/alfen.toml",
             "--port", str(cfg["charger_port"]), "--station", "ace2mqtt"]
 
+def log_alfen_warning(message):
+    now = time.monotonic()
+    last = WARNING_LAST_LOGGED.get(message)
+    if last is not None and now - last < WARNING_REPEAT_SECONDS:
+        LOG.debug("alfenctl: %s", message)
+        return
+    WARNING_LAST_LOGGED[message] = now
+    hint = " (set solar_controls to false to stop polling load balancing)" if "not licensed" in message else ""
+    LOG.warning("alfenctl: %s%s; repeats are logged at debug level", message, hint)
+
 def run_alfen(cfg, *args, timeout=30):
     # alfenctl talks to one charger over TCP; serialize polling and control so
     # concurrent requests cannot overlap on the charger connection.
@@ -202,7 +223,7 @@ def run_alfen(cfg, *args, timeout=30):
         raise RuntimeError(result.stderr.strip() or f"alfenctl exited {result.returncode}")
     for line in result.stderr.splitlines():
         if line.lower().startswith("warning:"):
-            LOG.warning("alfenctl: %s", line.removeprefix("warning:").strip())
+            log_alfen_warning(line.removeprefix("warning:").strip())
     return result.stdout
 
 def run_status(cfg):
@@ -1075,6 +1096,8 @@ def main():
     client = None
     poll = PollState()
     failures = 0
+    failing_since = None
+    marked_offline = False
     while not STOP.is_set():
         try:
             if client is None:
@@ -1084,12 +1107,19 @@ def main():
             if failures:
                 LOG.info("Polling recovered")
             failures = 0
+            failing_since = None
+            marked_offline = False
             delay = int(cfg["poll_interval"])
         except Exception as exc:
             failures += 1
             LOG.error("Polling/publishing failed: %s", exc)
-            if client:
+            now = time.monotonic()
+            failing_since = failing_since if failing_since is not None else now
+            # Brief charger hiccups (TLS timeouts) keep the last known values; only a
+            # longer outage makes the entities unavailable.
+            if client and not marked_offline and now - failing_since >= int(cfg.get("offline_after", 300)):
                 publish_offline(client, cfg)
+                marked_offline = True
             # Keep MQTT and the session state; only back off from the failing side.
             delay = min(MAX_BACKOFF_SECONDS, 10 * 2 ** min(failures - 1, 3))
         STOP.wait(delay)

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.0-beta.4
+
+- Short charger outages (TLS handshake timeouts) no longer flip every entity to unavailable: new `limits.offline_after` (default 300 s) keeps the last values; retries now back off at most 30 s.
+- Each distinct `alfenctl` warning (for example "not licensed for load balancing") is logged once per hour instead of on every poll, with a hint to use `solar_controls: false`.
+
 ## 0.2.0-beta.3
 
 - Options are grouped into `charger`, `mqtt`, `limits` and `evcc` sections. Existing flat configs are migrated automatically (legacy keys stay in the schema, empty, for now).

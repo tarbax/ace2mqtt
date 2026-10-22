@@ -119,13 +119,71 @@ class SolarControlTests(unittest.TestCase):
         self.assertTrue(published["homeassistant/select/dev/solar_mode/config"])
 
 
+class OutageToleranceTests(unittest.TestCase):
+    def test_repeated_alfenctl_warning_is_logged_once(self):
+        app.WARNING_LAST_LOGGED.clear()
+        msg = "static load balancing is on, but this station is not licensed for it"
+        with self.assertLogs(app.LOG, level="WARNING") as logs:
+            for _ in range(5):
+                app.log_alfen_warning(msg)
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn("solar_controls", logs.output[0])
+        with patch("app.time.monotonic", return_value=app.time.monotonic() + app.WARNING_REPEAT_SECONDS + 1), \
+                self.assertLogs(app.LOG, level="WARNING") as logs:
+            app.log_alfen_warning(msg)
+        self.assertEqual(len(logs.output), 1)
+
+    def _run(self, offline_after, failures):
+        calls = iter(failures)
+        def status(_cfg):
+            value = next(calls)
+            if isinstance(value, Exception):
+                raise value
+            return value
+        clock = iter(range(0, 10000, 10))
+        client = Mock()
+        app.STOP.clear()
+        remaining = [len(failures)]
+        def counted_wait(_delay):
+            remaining[0] -= 1
+            if remaining[0] <= 0:
+                app.STOP.set()
+            return app.STOP.is_set()
+        with patch("app.options", return_value={**CFG, "poll_interval": 10, "offline_after": offline_after}), \
+                patch("app.write_alfen_config"), patch("app.supervisor_mqtt", side_effect=lambda c: c), \
+                patch("app.signal.signal"), patch("app.connect_mqtt", return_value=client), \
+                patch("app.poll_once", side_effect=status), \
+                patch("app.time.monotonic", side_effect=lambda: next(clock)), \
+                patch.object(app.STOP, "wait", side_effect=counted_wait), \
+                self.assertLogs(app.LOG, level="ERROR"):
+            app.main()
+        app.STOP.clear()
+        return [c for c in client.publish.call_args_list if c.args[1] == "offline"]
+
+    def test_short_outage_keeps_entities_available(self):
+        offline = self._run(300, [RuntimeError("tls timeout")] * 3)
+        # the fake clock advances 20 s per failure, far below 300 s: only shutdown says offline
+        self.assertEqual(len(offline), 1)
+
+    def test_long_outage_marks_offline_once_then_shutdown(self):
+        offline = self._run(15, [RuntimeError("tls timeout")] * 4)
+        self.assertEqual(len(offline), 2)  # once after the grace period, once at shutdown
+
+    def test_offline_after_zero_is_immediate(self):
+        self.assertEqual(len(self._run(0, [RuntimeError("x")] * 2)), 2)
+
+    def test_negative_offline_after_is_rejected(self):
+        with self.assertRaises(ValueError):
+            app.validate_options({**CFG, "offline_after": -1})
+
+
 @unittest.skipIf(yaml is None, "PyYAML not installed")
 class AddonManifestTests(unittest.TestCase):
     def setUp(self):
         self.config = yaml.safe_load((ADDON / "config.yaml").read_text())
 
     def test_every_mapped_option_exists_in_options_and_schema(self):
-        for key, (section, name) in app.NESTED.items():
+        for key, (section, name) in app.OPTION_MAP.items():
             self.assertIn(name, self.config["schema"][section], key)
         for section, name in (("charger", "host"), ("mqtt", "host"), ("limits", "poll_interval")):
             self.assertIn(name, self.config["options"][section])

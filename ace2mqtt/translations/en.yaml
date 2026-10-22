@@ -59,6 +59,9 @@ configuration:
       poll_interval:
         name: Poll interval (s)
         description: Seconds to wait between polls of the charger.
+      offline_after:
+        name: Unavailable after (s)
+        description: Entities keep their last value during a short charger outage and only become unavailable after this many seconds of failed polls. 0 marks them unavailable immediately.
   evcc:
     name: evcc
     description: Optional. Assigns a vehicle in evcc based on the RFID card that was used.

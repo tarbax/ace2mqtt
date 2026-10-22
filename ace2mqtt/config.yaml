@@ -1,6 +1,6 @@
 name: "ace2mqtt"
 slug: "ace2mqtt"
-version: "0.2.0-beta.3"
+version: "0.2.0-beta.4"
 description: "Lees Alfen laadpaalstatus uit en publiceer die via MQTT met Home Assistant Discovery."
 url: "https://github.com/tarbax/ace2mqtt/tree/main/ace2mqtt"
 arch:
@@ -28,6 +28,7 @@ options:
     current_max: 32
     comfort_power_max_kw: 4.0
     poll_interval: 10
+    offline_after: 300
   evcc:
     loadpoint: 1
     vehicles: []
@@ -53,6 +54,7 @@ schema:
     current_max: int(1,64)
     comfort_power_max_kw: float(1.35,11)
     poll_interval: int(5,300)
+    offline_after: int(0,3600)
   evcc:
     url: url?
     loadpoint: int(1,)

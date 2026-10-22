@@ -75,6 +75,7 @@ Supervisor's MQTT service, so the Mosquitto add-on needs no configuration.
 | `limits.current_min` / `limits.current_max` | `6` / `32` | Range of the charging-current control in ampere (1–64). The charger's station-wide limit lowers the maximum further, live. |
 | `limits.comfort_power_max_kw` | `4.0` | Upper end of the Comfort power control, 1.35–11 kW in steps of 0.05. |
 | `limits.poll_interval` | `10` | Seconds to wait between polls (5–300). A delay after a poll completes, not a fixed sampling period. |
+| `limits.offline_after` | `300` | Seconds of failed polls before the entities become unavailable. During a shorter outage (for example a TLS handshake timeout) they keep their last value; *Last successful poll* shows the staleness. `0` marks them unavailable immediately. |
 
 ### evcc (optional)
 
@@ -210,8 +211,9 @@ for the next session instead of risking an old card.
 ## Reliability behaviour
 
 - A failing poll does not rebuild the MQTT connection or forget the session
-  state. The add-on reports `offline`, backs off 10, 20, 40 and then 60 seconds
-  and resumes where it left off.
+  state. Entities keep their last value for `limits.offline_after` seconds,
+  after which the add-on reports `offline`. It retries after 10, 20 and then
+  30 seconds and resumes where it left off.
 - Commands run on a separate worker thread, so a slow charger cannot stall MQTT
   keepalives.
 - Discovery configs and states are only published when they change, and again
@@ -222,6 +224,8 @@ for the next session instead of risking an old card.
 
 - **No entities** – check the add-on log. Verify the charger host, port and
   credentials (set `log_level: debug` for details), and that the MQTT integration uses the same discovery prefix.
+- **`static load balancing is on, but this station is not licensed for it`** – the charger has no load-balancing licence. Set `solar_controls` to `false`: the add-on then stops polling load balancing (fewer connections to the charger) and hides Comfort power, Green share and Charging mode. Without that, each distinct `alfenctl` warning is logged once per hour and repeats go to debug level.
+- **Entities flip to unavailable now and then** – the log shows `cannot reach the charger … handshake operation timed out`. The charger drops TLS connections when busy (for example while the Alfen app or another client is connected). Raise `limits.offline_after`, and increase `limits.poll_interval` to reduce load.
 - **Warnings that a value cannot be read** – some firmware versions do not
   support every property (Comfort power, Green share). The previous value is
   kept and the warning repeats; turn off `solar_controls` to hide them.
