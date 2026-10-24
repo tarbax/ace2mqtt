@@ -1,6 +1,6 @@
 name: "ace2mqtt"
 slug: "ace2mqtt"
-version: "0.2.0-beta.5"
+version: "0.2.0-beta.6"
 description: "Lees Alfen laadpaalstatus uit en publiceer die via MQTT met Home Assistant Discovery."
 url: "https://github.com/tarbax/ace2mqtt/tree/main/ace2mqtt"
 arch:
@@ -64,25 +64,3 @@ schema:
         vehicle: str
   solar_controls: bool
   log_level: list(debug|info|warning|error)
-  # Pre-0.2 flat options. Only accepted so existing installs can start and be
-  # migrated automatically; leave empty.
-  charger_host: str?
-  charger_port: port?
-  charger_username: str?
-  charger_password: password?
-  charger_http: bool?
-  socket_number: int(1,2)?
-  current_min: int(1,64)?
-  current_max: int(1,64)?
-  comfort_power_max_kw: float(1.35,11)?
-  poll_interval: int(5,300)?
-  mqtt_host: str?
-  mqtt_port: port?
-  mqtt_username: str?
-  mqtt_password: password?
-  mqtt_topic_prefix: str?
-  discovery_prefix: str?
-  evcc_base_url: str?
-  evcc_loadpoint_id: int?
-  evcc_password: password?
-  uid_vehicle_map: str?

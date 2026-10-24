@@ -39,10 +39,8 @@ WARNING_LAST_LOGGED = {}
 def clean_id(value):
     return re.sub(r"[^a-z0-9_]+", "_", value.lower()).strip("_") or "value"
 
-# Flat internal option name -> (section, name) in the grouped add-on options.
-# The flat names are the ones the previous versions used, so they double as the
-# legacy keys that are still accepted (and migrated) at startup.
-NESTED = {
+# Internal option name -> (section, name) in the grouped add-on options.
+OPTION_MAP = {
     "charger_host": ("charger", "host"), "charger_port": ("charger", "port"),
     "charger_username": ("charger", "username"), "charger_password": ("charger", "password"),
     "charger_http": ("charger", "http"), "socket_number": ("charger", "socket"),
@@ -53,11 +51,8 @@ NESTED = {
     "comfort_power_max_kw": ("limits", "comfort_power_max_kw"), "poll_interval": ("limits", "poll_interval"),
     "evcc_base_url": ("evcc", "url"), "evcc_loadpoint_id": ("evcc", "loadpoint"),
     "evcc_password": ("evcc", "password"),
+    "offline_after": ("limits", "offline_after"),
 }
-LEGACY_KEYS = (*NESTED, "uid_vehicle_map")
-# Options that only exist in the grouped layout (no legacy flat key).
-OPTION_MAP = {**NESTED, "offline_after": ("limits", "offline_after")}
-OPTIONAL_KEYS = ("charger_port", "mqtt_username", "mqtt_password", "evcc_base_url", "evcc_password")
 DEFAULTS = {
     "charger_username": "admin", "charger_password": "", "charger_http": False, "socket_number": 1,
     "mqtt_host": "core-mosquitto", "mqtt_port": 1883, "mqtt_username": "", "mqtt_password": "",
@@ -72,16 +67,10 @@ def option_label(key):
     return f"{section}.{name}" if section else name
 
 def normalize_options(raw):
-    """Turn the grouped add-on options (or a pre-0.2 flat config) into the flat internal config.
-
-    Returns (config, migrated); migrated is True when legacy flat keys were found.
-    """
-    migrated = any(key in raw for key in LEGACY_KEYS)
+    """Turn grouped add-on options into the internal configuration."""
     cfg = {}
     for key, (section, name) in OPTION_MAP.items():
         value = (raw.get(section) or {}).get(name)
-        if migrated and raw.get(key) is not None:
-            value = raw[key]
         cfg[key] = DEFAULTS.get(key) if value is None else value
     cfg.setdefault("charger_host", None)
     if cfg["charger_host"] is None:
@@ -93,55 +82,15 @@ def normalize_options(raw):
         if isinstance(entry, dict) and str(entry.get("uid", "")).strip() and str(entry.get("vehicle", "")).strip():
             vehicles[str(entry["uid"]).strip()] = str(entry["vehicle"]).strip()
     cfg["uid_vehicle_map"] = vehicles
-    legacy_map = raw.get("uid_vehicle_map")
-    if migrated and isinstance(legacy_map, str) and legacy_map.strip() not in ("", "{}"):
-        try:
-            parsed = json.loads(legacy_map)
-            if not isinstance(parsed, dict):
-                raise TypeError
-            cfg["uid_vehicle_map"] = {**parsed, **vehicles}
-        except (TypeError, json.JSONDecodeError):
-            cfg["uid_vehicle_map"] = legacy_map  # rejected with a clear error by validate_options
     cfg["solar_controls"] = raw.get("solar_controls", True) is not False
     cfg["log_level"] = str(raw.get("log_level") or "info").lower()
-    return cfg, migrated
-
-def grouped_options(cfg, raw):
-    """The grouped options structure for a flat config, as stored by the Supervisor."""
-    grouped = {"charger": {}, "mqtt": {}, "limits": {}, "evcc": {}}
-    for key, (section, name) in OPTION_MAP.items():
-        value = cfg[key]
-        if key in OPTIONAL_KEYS and (value == "" or (
-                key == "charger_port" and value == (80 if cfg["charger_http"] else 443))):
-            continue  # optional and empty/derived: leave unset
-        grouped[section][name] = value
-    mapping = cfg["uid_vehicle_map"] if isinstance(cfg["uid_vehicle_map"], dict) else {}
-    grouped["evcc"]["vehicles"] = [{"uid": uid, "vehicle": vehicle} for uid, vehicle in mapping.items()]
-    return {**grouped, "solar_controls": cfg["solar_controls"], "log_level": cfg["log_level"]}
-
-def save_supervisor_options(grouped):
-    """Store migrated options through the Supervisor so legacy keys disappear from the UI."""
-    token = os.environ.get("SUPERVISOR_TOKEN")
-    if not token:
-        return False
-    try:
-        response = requests.post("http://supervisor/addons/self/options", json={"options": grouped},
-                                 headers={"Authorization": f"Bearer {token}"}, timeout=10)
-        response.raise_for_status()
-        return True
-    except Exception as exc:
-        LOG.warning("Could not store the migrated options (%s); re-enter them in the new layout", exc)
-        return False
+    return cfg
 
 def options():
     # Home Assistant add-on options are mounted at /data/options.json.
     with open("/data/options.json", encoding="utf-8") as f:
         raw = json.load(f)
-    cfg, migrated = normalize_options(raw)
-    if migrated:
-        LOG.info("Migrating flat options to the grouped layout")
-        if save_supervisor_options(grouped_options(cfg, raw)):
-            LOG.info("Migrated options stored; the old keys are no longer needed")
+    cfg = normalize_options(raw)
     for key in ("charger_host", "mqtt_host", "mqtt_topic_prefix", "discovery_prefix"):
         if not str(cfg.get(key, "")).strip():
             raise ValueError(f"Option '{option_label(key)}' is required")

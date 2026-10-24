@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.0-beta.6
+
+- Remove the old flat configuration fields, their translations and automatic migration. Only the grouped configuration is supported; older installations must enter settings in the grouped layout.
+- Update maintainer references to tarbax.
+
 ## 0.2.0-beta.4
 
 - Short charger outages (TLS handshake timeouts) no longer flip every entity to unavailable: new `limits.offline_after` (default 300 s) keeps the last values; retries now back off at most 30 s.
