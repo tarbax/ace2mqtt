@@ -224,7 +224,7 @@ for the next session instead of risking an old card.
 
 - **No entities** – check the add-on log. Verify the charger host, port and
   credentials (set `log_level: debug` for details), and that the MQTT integration uses the same discovery prefix.
-- **`static load balancing is on, but this station is not licensed for it`** – the charger has no load-balancing licence. Set `solar_controls` to `false`: the add-on then stops polling load balancing (fewer connections to the charger) and hides Comfort power, Green share and Charging mode. Without that, each distinct `alfenctl` warning is logged once per hour and repeats go to debug level.
+- **`static load balancing is on, but this station is not licensed for it`** – a setting on the charger itself (that load-balancing mode is switched on without a licence). It does not affect ace2mqtt; each distinct `alfenctl` warning is logged once per hour and repeats go to debug level.
 - **Entities flip to unavailable now and then** – the log shows `cannot reach the charger … handshake operation timed out`. The charger drops TLS connections when busy (for example while the Alfen app or another client is connected). Raise `limits.offline_after`, and increase `limits.poll_interval` to reduce load.
 - **Warnings that a value cannot be read** – some firmware versions do not
   support every property (Comfort power, Green share). The previous value is
@@ -241,7 +241,7 @@ for the next session instead of risking an old card.
   writes, MQTT/Home Assistant behaviour and the evcc password login are only
   covered by unit tests against the pinned `alfenctl` CLI.
 - Every control readback and the status call run one `alfenctl` process each,
-  serialised on the charger connection.
+  serialised on the charger connection (Comfort power and Green share share one call).
 - RFID is derived from transactions: rejected scans and cards the charger does
   not record cannot be identified, and a short authorisation can fall between
   polls.
@@ -257,7 +257,7 @@ pip install -r ace2mqtt/requirements.txt
 PYTHONPATH=ace2mqtt:ace2mqtt/tests python3 -m unittest discover -s ace2mqtt/tests
 ```
 
-Without the pinned `alfenctl==0.1.0` package the upstream contract tests are
+Without the pinned `alfenctl==0.2.0` package the upstream contract tests are
 skipped. The tests never contact a charger, broker, Home Assistant or evcc. CI
 also runs `ruff check`. See [`docs/cli-audit.md`](docs/cli-audit.md) for the CLI
 audit and [`CHANGELOG.md`](CHANGELOG.md) for changes.

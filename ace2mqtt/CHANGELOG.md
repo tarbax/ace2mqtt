@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0-beta.5
+
+- Updated to `alfenctl==0.2.0` (contract tests unchanged and passing).
+- Comfort power and Green share are read with a single `alfenctl get 3280_3 3280_2` call, one charger connection less per readback round.
+- The "static load balancing ... not licensed" warning is explained as a charger setting that does not affect ace2mqtt.
+
 ## 0.2.0-beta.4
 
 - Short charger outages (TLS handshake timeouts) no longer flip every entity to unavailable: new `limits.offline_after` (default 300 s) keeps the last values; retries now back off at most 30 s.

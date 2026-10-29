@@ -119,6 +119,25 @@ class SolarControlTests(unittest.TestCase):
         self.assertTrue(published["homeassistant/select/dev/solar_mode/config"])
 
 
+class SolarReadbackTests(unittest.TestCase):
+    def test_comfort_and_green_share_use_one_alfenctl_call(self):
+        output = ("ID NAME VALUE ACCESS TITLE\n3280_2 solarGreenShare 25 rw Green share\n"
+                  "3280_3 solarComfortW 4200 rw Comfort level\n")
+        client = Mock()
+        with patch("app.run_alfen", return_value=output) as run:
+            self.assertTrue(app.publish_solar_properties_readback(client, CFG))
+        run.assert_called_once_with(CFG, "get", "3280_3", "3280_2", timeout=20)
+        client.publish.assert_any_call("ace2mqtt/state/comfort_power", "4.2", qos=1, retain=True)
+        client.publish.assert_any_call("ace2mqtt/state/green_share", "25", qos=1, retain=True)
+
+    def test_one_unreadable_property_does_not_block_the_other(self):
+        client = Mock()
+        with patch("app.run_alfen", return_value="3280_2 solarGreenShare 30 rw Green share\n"), \
+                self.assertLogs(app.LOG, level="WARNING"):
+            self.assertFalse(app.publish_solar_properties_readback(client, CFG))
+        client.publish.assert_called_once_with("ace2mqtt/state/green_share", "30", qos=1, retain=True)
+
+
 class OutageToleranceTests(unittest.TestCase):
     def test_repeated_alfenctl_warning_is_logged_once(self):
         app.WARNING_LAST_LOGGED.clear()
@@ -127,7 +146,7 @@ class OutageToleranceTests(unittest.TestCase):
             for _ in range(5):
                 app.log_alfen_warning(msg)
         self.assertEqual(len(logs.output), 1)
-        self.assertIn("solar_controls", logs.output[0])
+        self.assertIn("without a licence", logs.output[0])
         with patch("app.time.monotonic", return_value=app.time.monotonic() + app.WARNING_REPEAT_SECONDS + 1), \
                 self.assertLogs(app.LOG, level="WARNING") as logs:
             app.log_alfen_warning(msg)

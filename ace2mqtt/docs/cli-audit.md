@@ -1,6 +1,13 @@
-# alfenctl I/O audit — 2026-10-10
+# alfenctl I/O audit — 2026-10-10, re-checked 2026-10-29
 
-Reference: the published `alfenctl==0.1.0` wheel, matching requirements.txt.
+Reference: the published `alfenctl==0.2.0` wheel, matching requirements.txt.
+The original audit was done against 0.1.0; the contract tests, the parser
+(including `get` with several ids, now used for Comfort level + Green share),
+the `status --json` shape, the output formats we parse and the `warning:`
+stderr format were re-run against 0.2.0 and are unchanged. 0.2.0 moves the
+network code to `transport.py` with the same timeouts, adds the
+`devicectl-core` dependency, cloud/connectivity commands and `--station a,b`
+fan-out for reads; none of these are used here.
 Tests run against its CLI parser and output formatters with synthetic data;
 no charger, broker, Home Assistant instance or evcc server was contacted.
 

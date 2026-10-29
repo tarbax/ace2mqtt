@@ -24,7 +24,7 @@ RFID_PULSE_LOCK = threading.Lock()
 RFID_PULSE_TIMERS = {}
 EVCC_RETRY_DELAYS = (1, 3, 5)
 RFID_SEARCH_SECONDS = 180
-# alfenctl 0.1.0 loadbalancing.SOLAR_MODES; --solar-mode expects an integer.
+# alfenctl loadbalancing.SOLAR_MODES; --solar-mode expects an integer.
 SOLAR_MODE_VALUES = {"off": "0", "comfort": "1", "green": "2"}
 STOP = threading.Event()
 # Control readbacks cost one alfenctl process each; external changes (for
@@ -209,7 +209,8 @@ def log_alfen_warning(message):
         LOG.debug("alfenctl: %s", message)
         return
     WARNING_LAST_LOGGED[message] = now
-    hint = " (set solar_controls to false to stop polling load balancing)" if "not licensed" in message else ""
+    hint = (" (a charger setting: this load-balancing mode is switched on without a licence; "
+            "it does not stop ace2mqtt from working)") if "not licensed" in message else ""
     LOG.warning("alfenctl: %s%s; repeats are logged at debug level", message, hint)
 
 def run_alfen(cfg, *args, timeout=30):
@@ -989,6 +990,25 @@ def publish_comfort_power_readback(client, cfg):
         LOG.warning("Reading back comfort power failed: %s", exc)
         return False
 
+def publish_solar_properties_readback(client, cfg):
+    """Read Comfort level and Green share with one alfenctl call (one charger connection)."""
+    try:
+        with ALFEN_LOCK:
+            output = run_alfen(cfg, "get", "3280_3", "3280_2", timeout=20)
+            root = cfg["mqtt_topic_prefix"].strip("/")
+            ok = True
+            for name, value in (("comfort_power", parse_comfort_power(output)),
+                                ("green_share", parse_green_share(output))):
+                if value is None:
+                    LOG.warning("Could not read %s from alfenctl", name)
+                    ok = False
+                else:
+                    client.publish(f"{root}/state/{name}", value, qos=1, retain=True)
+            return ok
+    except Exception as exc:
+        LOG.warning("Reading back solar properties failed: %s", exc)
+        return False
+
 def parse_green_share(output):
     """Read the Alfen green-share value from its get table or set output."""
     value = parse_property_number(output, "3280_2")
@@ -1065,8 +1085,7 @@ def poll_once(client, cfg, poll):
         publish_current_readback(client, cfg)
         if cfg.get("solar_controls", True):
             publish_solar_mode_readback(client, cfg)
-            publish_comfort_power_readback(client, cfg)
-            publish_green_share_readback(client, cfg)
+            publish_solar_properties_readback(client, cfg)
         publish_socket_readback(client, cfg)
         publish_override_readback(client, cfg)
     poll.polls += 1

@@ -1,4 +1,4 @@
-"""Contract checks against alfenctl 0.1.0, without contacting a charger."""
+"""Contract checks against alfenctl 0.2.0, without contacting a charger."""
 import contextlib
 import io
 import json
@@ -25,7 +25,7 @@ def capture(fn, *args, **kwargs):
     return out.getvalue()
 
 
-@unittest.skipIf(build_parser is None, "Install pinned alfenctl==0.1.0 for upstream contract tests")
+@unittest.skipIf(build_parser is None, "Install pinned alfenctl==0.2.0 for upstream contract tests")
 class UpstreamContractTests(unittest.TestCase):
     def test_every_command_is_accepted_by_real_cli_parser(self):
         commands = [
@@ -147,7 +147,7 @@ Random delay  0 s (below the compliant 600 s)
 
     def _run_main(self, waits, run_status, connect=None):
         from contextlib import ExitStack
-        readers = ['current', 'solar_mode', 'comfort_power', 'green_share', 'socket', 'override']
+        readers = ['current', 'solar_mode', 'solar_properties', 'socket', 'override']
         client = Mock()
         app.STOP.clear()
         def wait(_delay):
