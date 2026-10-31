@@ -92,11 +92,24 @@ evcc:
   loadpoint: 1
   vehicles:
     - uid: "04AABBCCDDEEFF"
-      vehicle: "vehicle_name"
+      vehicle: "db:1"
 ```
 
-Use the vehicle's **internal name** from evcc, not its display title. UIDs are
-matched case-insensitively and ignore separators, so `04:aa:bb:cc:dd:ee:ff`
+Use the vehicle's **internal name** from evcc:
+
+- For a vehicle created through the evcc web interface, this is usually
+  `db:<number>`, for example `db:1` or `db:2`. Enter the complete value,
+  including the `db:` prefix. Use the actual ID of your vehicle; the number
+  is not the loadpoint number.
+- For a vehicle defined in `evcc.yaml`, use its `name` value, for example
+  `vehicle: "my_car"` when the vehicle configuration has `name: my_car`.
+
+The display title shown in evcc (such as “Family car”) is a separate value.
+You can check the internal names in evcc's `/api/state` response: the keys
+under `vehicles` identify the configured vehicles, while each vehicle's
+`title` is its display name.
+
+UIDs are matched case-insensitively and ignore separators, so `04:aa:bb:cc:dd:ee:ff`
 and `04AABBCCDDEEFF` are the same card.
 
 ### General
@@ -108,13 +121,10 @@ and `04AABBCCDDEEFF` are the same card.
 
 ### Upgrading from versions before 0.2
 
-Earlier versions used a flat option list (`charger_host`, `mqtt_host`,
-`uid_vehicle_map` as JSON, …). The old keys are still accepted by the schema so
-an existing install starts normally. On startup the add-on converts them to the
-grouped layout and stores the result through the Supervisor, after which the
-old fields are empty. If the Supervisor cannot be reached the converted values
-are used for that run and a warning is logged; re-enter them in the new layout
-then. The empty "Legacy" fields will be removed in a later version.
+Only the grouped configuration is supported from `0.2.0-beta.6` onward.
+When upgrading from a version before 0.2, enter your settings under `charger`,
+`mqtt`, `limits` and `evcc` before starting the add-on. Configure RFID cards in
+`evcc.vehicles`. The old flat fields and automatic migration have been removed.
 
 ## Entities
 
@@ -264,10 +274,10 @@ audit and [`CHANGELOG.md`](CHANGELOG.md) for changes.
 
 ## Credits and license
 
-This add-on is based on [`alfenctl`](https://github.com/pbasista/alfenctl),
-created by [Peter Basista](https://github.com/pbasista). `alfenctl` provides
-the Alfen charger communication and command-line interface used by this
-project. Many thanks to Peter for making that project available. `alfenctl`
-is installed separately from PyPI and is licensed under EUPL-1.2; see its
-repository for its source and license notices. The `ace2mqtt` add-on wrapper
-is also licensed under EUPL-1.2.
+The `ace2mqtt` add-on is maintained by [tarbax](https://github.com/tarbax)
+and is licensed under EUPL-1.2.
+
+The add-on uses [`alfenctl`](https://github.com/pbasista/alfenctl) for Alfen
+charger communication and its command-line interface. It is installed separately
+from PyPI and licensed under EUPL-1.2; see its repository for source and license
+notices.

@@ -23,8 +23,7 @@ GROUPED = {
 
 class OptionNormalisationTests(unittest.TestCase):
     def test_grouped_options_become_flat_internal_config(self):
-        cfg, migrated = app.normalize_options(GROUPED)
-        self.assertFalse(migrated)
+        cfg = app.normalize_options(GROUPED)
         self.assertEqual((cfg["charger_host"], cfg["socket_number"], cfg["mqtt_topic_prefix"]),
                          ("192.0.2.10", 2, "alfen"))
         self.assertEqual((cfg["current_max"], cfg["poll_interval"]), (16, 15))
@@ -36,43 +35,23 @@ class OptionNormalisationTests(unittest.TestCase):
         app.validate_options(cfg)
 
     def test_port_follows_http_choice_unless_set(self):
-        https, _ = app.normalize_options(GROUPED)
-        http, _ = app.normalize_options({**GROUPED, "charger": {**GROUPED["charger"], "http": True}})
-        custom, _ = app.normalize_options({**GROUPED, "charger": {**GROUPED["charger"], "port": 8443}})
+        https = app.normalize_options(GROUPED)
+        http = app.normalize_options({**GROUPED, "charger": {**GROUPED["charger"], "http": True}})
+        custom = app.normalize_options({**GROUPED, "charger": {**GROUPED["charger"], "port": 8443}})
         self.assertEqual((https["charger_port"], http["charger_port"], custom["charger_port"]), (443, 80, 8443))
 
     def test_defaults_for_optional_values(self):
-        cfg, _ = app.normalize_options({"charger": {"host": "h"}})
+        cfg = app.normalize_options({"charger": {"host": "h"}})
         self.assertEqual((cfg["mqtt_username"], cfg["evcc_base_url"], cfg["log_level"]), ("", "", "info"))
         self.assertTrue(cfg["solar_controls"])
         self.assertEqual(cfg["uid_vehicle_map"], {})
 
-    def test_legacy_flat_options_are_migrated_and_win_over_group_defaults(self):
-        legacy = {"charger_host": "192.0.2.10", "charger_port": 443, "charger_username": "admin",
-                  "charger_password": "pw", "charger_http": False, "socket_number": 1,
-                  "current_min": 10, "current_max": 20, "poll_interval": 30,
-                  "mqtt_host": "core-mosquitto", "mqtt_topic_prefix": "ace2mqtt",
-                  "evcc_base_url": "http://evcc:7070", "evcc_loadpoint_id": 3,
-                  "uid_vehicle_map": '{"04AA": "car"}',
-                  "limits": {"current_min": 6, "current_max": 32}}
-        cfg, migrated = app.normalize_options(legacy)
-        self.assertTrue(migrated)
-        self.assertEqual((cfg["current_min"], cfg["current_max"], cfg["poll_interval"]), (10, 20, 30))
-        self.assertEqual((cfg["charger_host"], cfg["evcc_loadpoint_id"]), ("192.0.2.10", 3))
-        self.assertEqual(cfg["uid_vehicle_map"], {"04AA": "car"})
-        grouped = app.grouped_options(cfg, legacy)
-        self.assertEqual(grouped["charger"], {"host": "192.0.2.10", "username": "admin", "password": "pw",
-                                              "http": False, "socket": 1})
-        self.assertEqual(grouped["limits"]["current_min"], 10)
-        self.assertEqual(grouped["evcc"]["vehicles"], [{"uid": "04AA", "vehicle": "car"}])
-        self.assertNotIn("password", grouped["evcc"])
-        self.assertNotIn("username", grouped["mqtt"])
-        self.assertFalse(any(key in grouped for key in app.LEGACY_KEYS))
-
-    def test_invalid_legacy_vehicle_map_is_rejected_by_validation(self):
-        cfg, _ = app.normalize_options({"charger_host": "h", "uid_vehicle_map": "not json"})
-        with self.assertRaises(ValueError):
-            app.validate_options(cfg)
+    def test_flat_options_do_not_override_grouped_values(self):
+        cfg = app.normalize_options({**GROUPED, "charger_host": "old-host",
+                                     "current_max": 64, "uid_vehicle_map": '{"OLD": "old-car"}'})
+        self.assertEqual(cfg["charger_host"], "192.0.2.10")
+        self.assertEqual(cfg["current_max"], 16)
+        self.assertEqual(cfg["uid_vehicle_map"], {"04:AA": "car"})
 
     def test_options_reads_file_and_requires_charger_host(self):
         for raw, ok in ((GROUPED, True), ({"charger": {"host": ""}}, False)):
@@ -83,19 +62,11 @@ class OptionNormalisationTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, r"charger\.host"):
                         app.options()
 
-    def test_migration_is_stored_through_supervisor(self):
-        raw = {"charger_host": "h", "mqtt_host": "m", "mqtt_topic_prefix": "p", "discovery_prefix": "d"}
+    def test_flat_only_options_require_grouped_charger_host(self):
+        raw = {"charger_host": "old-host"}
         with patch("builtins.open", unittest.mock.mock_open(read_data=json.dumps(raw))), \
-                patch("app.save_supervisor_options", return_value=True) as save:
+                self.assertRaisesRegex(ValueError, r"charger\.host"):
             app.options()
-        save.assert_called_once()
-        self.assertEqual(save.call_args.args[0]["charger"]["host"], "h")
-
-    def test_save_supervisor_options_needs_token_and_survives_errors(self):
-        with patch.dict("os.environ", {}, clear=True):
-            self.assertFalse(app.save_supervisor_options({}))
-        with patch.dict("os.environ", {"SUPERVISOR_TOKEN": "t"}), patch("app.requests.post", side_effect=OSError("x")):
-            self.assertFalse(app.save_supervisor_options({}))
 
 
 class SolarControlTests(unittest.TestCase):
@@ -207,14 +178,15 @@ class AddonManifestTests(unittest.TestCase):
         for section, name in (("charger", "host"), ("mqtt", "host"), ("limits", "poll_interval")):
             self.assertIn(name, self.config["options"][section])
 
-    def test_legacy_keys_are_optional_and_not_in_defaults(self):
-        for key in app.LEGACY_KEYS:
-            self.assertTrue(str(self.config["schema"][key]).endswith("?"), key)
-            self.assertNotIn(key, self.config["options"])
+    def test_only_current_groups_and_general_options_are_exposed(self):
+        expected = {"charger", "mqtt", "limits", "evcc", "solar_controls", "log_level"}
+        self.assertEqual(set(self.config["schema"]), expected)
+        self.assertEqual(set(self.config["options"]), expected)
+        translations = yaml.safe_load((ADDON / "translations" / "en.yaml").read_text())["configuration"]
+        self.assertEqual(set(translations), expected)
 
     def test_defaults_normalise_to_a_valid_config_except_the_host(self):
-        cfg, migrated = app.normalize_options(self.config["options"])
-        self.assertFalse(migrated)
+        cfg = app.normalize_options(self.config["options"])
         self.assertEqual(cfg["charger_host"], "")
         cfg["charger_host"] = "192.0.2.10"
         app.validate_options(cfg)

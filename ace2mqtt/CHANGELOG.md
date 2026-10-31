@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.0-beta.6
+
+- Remove the old flat configuration fields, their translations and automatic migration. Only the grouped configuration is supported; older installations must enter settings in the grouped layout.
+- Update maintainer references to tarbax.
+
 ## 0.2.0-beta.5
 
 - Updated to `alfenctl==0.2.0` (contract tests unchanged and passing).

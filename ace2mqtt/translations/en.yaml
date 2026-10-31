@@ -77,70 +77,10 @@ configuration:
         description: Only needed when evcc authentication is enabled.
       vehicles:
         name: Vehicles
-        description: One row per RFID card, with its UID and the evcc internal vehicle name.
+        description: "One row per RFID card, with its UID and the evcc internal vehicle name. For vehicles created in the evcc web interface, use the full ID such as db:1. For YAML-configured vehicles, use their name value. The display title is a separate value."
   solar_controls:
     name: Solar controls
     description: Show Comfort power, Green share and Charging mode. Turn off when the firmware does not support them.
   log_level:
     name: Log level
     description: Use debug to log every alfenctl call when troubleshooting.
-  charger_host:
-    name: Legacy - charger host
-    description: Old flat option. Migrated automatically; leave empty.
-  charger_port:
-    name: Legacy - charger port
-    description: Old flat option. Migrated automatically; leave empty.
-  charger_username:
-    name: Legacy - charger username
-    description: Old flat option. Migrated automatically; leave empty.
-  charger_password:
-    name: Legacy - charger password
-    description: Old flat option. Migrated automatically; leave empty.
-  charger_http:
-    name: Legacy - use HTTP
-    description: Old flat option. Migrated automatically; leave empty.
-  socket_number:
-    name: Legacy - socket
-    description: Old flat option. Migrated automatically; leave empty.
-  current_min:
-    name: Legacy - minimum current
-    description: Old flat option. Migrated automatically; leave empty.
-  current_max:
-    name: Legacy - maximum current
-    description: Old flat option. Migrated automatically; leave empty.
-  comfort_power_max_kw:
-    name: Legacy - maximum Comfort power
-    description: Old flat option. Migrated automatically; leave empty.
-  poll_interval:
-    name: Legacy - poll interval
-    description: Old flat option. Migrated automatically; leave empty.
-  mqtt_host:
-    name: Legacy - MQTT host
-    description: Old flat option. Migrated automatically; leave empty.
-  mqtt_port:
-    name: Legacy - MQTT port
-    description: Old flat option. Migrated automatically; leave empty.
-  mqtt_username:
-    name: Legacy - MQTT username
-    description: Old flat option. Migrated automatically; leave empty.
-  mqtt_password:
-    name: Legacy - MQTT password
-    description: Old flat option. Migrated automatically; leave empty.
-  mqtt_topic_prefix:
-    name: Legacy - topic prefix
-    description: Old flat option. Migrated automatically; leave empty.
-  discovery_prefix:
-    name: Legacy - discovery prefix
-    description: Old flat option. Migrated automatically; leave empty.
-  evcc_base_url:
-    name: Legacy - evcc URL
-    description: Old flat option. Migrated automatically; leave empty.
-  evcc_loadpoint_id:
-    name: Legacy - evcc loadpoint
-    description: Old flat option. Migrated automatically; leave empty.
-  evcc_password:
-    name: Legacy - evcc password
-    description: Old flat option. Migrated automatically; leave empty.
-  uid_vehicle_map:
-    name: Legacy - RFID to vehicle map
-    description: Old JSON option. Migrated automatically into the evcc vehicles list; leave empty.
