@@ -36,6 +36,21 @@ MAX_BACKOFF_SECONDS = 30
 WARNING_REPEAT_SECONDS = 3600
 WARNING_LAST_LOGGED = {}
 
+# Smart-meter (P1) settings that can be written with `alfenctl lb set`. The state
+# topics are the ones the status sensors already publish for the same properties
+# (0x2067 max meter/installation current, 0x2068 safe current).
+METER_CURRENT_CEILING = 100  # alfenctl's own limit for the safe current
+METER_CONTROLS = {
+    "max_meter_current": {"flag": "--max-meter-current", "property": "2067_0",
+                          "state": "max_installation_current_a", "name": "Maximum meter current",
+                          "icon": "mdi:meter-electric", "low": 1},
+    "safe_current": {"flag": "--safe-current", "property": "2068_0",
+                     "state": "active_safe_current_a", "name": "Safe current (P1 failsafe)",
+                     "icon": "mdi:shield-alert-outline", "low": 0},
+}
+
+METER_STATE_KEYS = {spec["state"] for spec in METER_CONTROLS.values()}
+
 def clean_id(value):
     return re.sub(r"[^a-z0-9_]+", "_", value.lower()).strip("_") or "value"
 
@@ -52,13 +67,14 @@ OPTION_MAP = {
     "evcc_base_url": ("evcc", "url"), "evcc_loadpoint_id": ("evcc", "loadpoint"),
     "evcc_password": ("evcc", "password"),
     "offline_after": ("limits", "offline_after"),
+    "meter_current_max": ("limits", "meter_current_max"),
 }
 DEFAULTS = {
     "charger_username": "admin", "charger_password": "", "charger_http": False, "socket_number": 1,
     "mqtt_host": "core-mosquitto", "mqtt_port": 1883, "mqtt_username": "", "mqtt_password": "",
     "mqtt_topic_prefix": "ace2mqtt", "discovery_prefix": "homeassistant",
     "current_min": 6, "current_max": 32, "comfort_power_max_kw": 4.0, "poll_interval": 10,
-    "offline_after": 300,
+    "offline_after": 300, "meter_current_max": 63,
     "evcc_base_url": "", "evcc_loadpoint_id": 1, "evcc_password": "",
 }
 
@@ -83,6 +99,7 @@ def normalize_options(raw):
             vehicles[str(entry["uid"]).strip()] = str(entry["vehicle"]).strip()
     cfg["uid_vehicle_map"] = vehicles
     cfg["solar_controls"] = raw.get("solar_controls", True) is not False
+    cfg["meter_controls"] = raw.get("meter_controls", False) is True
     cfg["log_level"] = str(raw.get("log_level") or "info").lower()
     return cfg
 
@@ -104,6 +121,11 @@ def validate_options(cfg):
             raise ValueError
     except (TypeError, ValueError):
         raise ValueError("limits.offline_after must be a non-negative number of seconds") from None
+    try:
+        if not 1 <= int(cfg.get("meter_current_max", 63)) <= METER_CURRENT_CEILING:
+            raise ValueError
+    except (TypeError, ValueError):
+        raise ValueError(f"limits.meter_current_max must be between 1 and {METER_CURRENT_CEILING} A") from None
     comfort_max = Decimal(str(cfg.get("comfort_power_max_kw", 4.0)))
     if (not comfort_max.is_finite() or not Decimal("1.35") <= comfort_max <= Decimal("11.00")
             or (comfort_max * 1000) % 50):
@@ -262,6 +284,17 @@ def publish_control_discovery(client, cfg, device_id, device):
         "command_topic": f"{root}/control/current", "state_topic": f"{root}/state/current_limit",
         "min": current_min, "max": current_max, "step": 1, "unit_of_measurement": "A",
         "mode": "slider", "optimistic": False, "retain": False, "device": device, **avail})
+    ceiling = min(METER_CURRENT_CEILING, int(cfg.get("meter_current_max", 63)))
+    for key, spec in METER_CONTROLS.items():
+        if not cfg.get("meter_controls", False):
+            client.publish(f"{discovery_prefix}/number/{device_id}/{key}/config", "", qos=1, retain=True)
+            continue
+        publish_config(client, cfg, "number", device_id, key, {
+            "name": spec["name"], "unique_id": f"{device_id}_{key}",
+            "command_topic": f"{root}/control/{key}", "state_topic": f"{root}/state/{spec['state']}",
+            "min": spec["low"], "max": ceiling, "step": 1, "unit_of_measurement": "A",
+            "device_class": "current", "mode": "box", "icon": spec["icon"], "entity_category": "config",
+            "has_entity_name": True, "optimistic": False, "retain": False, "device": device, **avail})
     solar = cfg.get("solar_controls", True)
     if not solar:
         # Firmware without load-balancing properties: keep these entities out of Home Assistant.
@@ -347,6 +380,24 @@ def handle_command(cfg, topic, payload, retained=False):
         run_alfen(cfg, "current", "set", str(amps), "--socket", socket)
         LOG.info("Charging current for socket %s updated", socket)
         return str(amps)
+    for name, spec in METER_CONTROLS.items():
+        if topic != f"{root}/control/{name}":
+            continue
+        if not cfg.get("meter_controls", False):
+            LOG.warning("Ignored %s: meter controls are disabled in the options", name)
+            return
+        try:
+            numeric = float(payload)
+        except ValueError:
+            LOG.warning("Invalid %s received", name)
+            return
+        ceiling = min(METER_CURRENT_CEILING, int(cfg.get("meter_current_max", 63)))
+        if not math.isfinite(numeric) or not numeric.is_integer() or not spec["low"] <= numeric <= ceiling:
+            LOG.warning("%s must be a whole number of amperes from %s to %s", spec["name"], spec["low"], ceiling)
+            return
+        run_alfen(cfg, "lb", "set", spec["flag"], str(int(numeric)))
+        LOG.info("%s set to %s A", spec["name"], int(numeric))
+        return str(int(numeric))
     if topic in (f"{root}/control/{name}" for name in ("comfort_power", "green_share", "solar_mode")) \
             and not cfg.get("solar_controls", True):
         LOG.warning("Ignored %s: solar controls are disabled in the options", topic.rsplit("/", 1)[-1])
@@ -390,7 +441,7 @@ def handle_command(cfg, topic, payload, retained=False):
 
 def subscribe_commands(client, cfg):
     root = cfg["mqtt_topic_prefix"].strip("/")
-    for name in ("socket", "charging_profile_override", "socket_enable", "socket_disable", "direct_start_on", "direct_start_off", "current", "comfort_power", "green_share", "solar_mode"):
+    for name in ("socket", "charging_profile_override", "socket_enable", "socket_disable", "direct_start_on", "direct_start_off", "current", "comfort_power", "green_share", "solar_mode", *METER_CONTROLS):
         client.subscribe(f"{root}/control/{name}", qos=1)
 
 def mqtt_connected(client, cfg):
@@ -415,6 +466,8 @@ def on_message(client, cfg, message):
                 "green_share": publish_green_share_readback,
                 "socket": publish_socket_readback,
                 "charging_profile_override": publish_override_readback,
+                "max_meter_current": lambda c, cf: publish_meter_readback(c, cf, "max_meter_current"),
+                "safe_current": lambda c, cf: publish_meter_readback(c, cf, "safe_current"),
             }
             if value is not None and name in readers:
                 readers[name](client, cfg)
@@ -608,7 +661,12 @@ def publish_discovery(client, cfg, state):
             config.update({"payload_on": "true", "payload_off": "false"})
         elif isinstance(value, float):
             config["suggested_display_precision"] = 2
-        publish_config(client, cfg, component, device_id, entity, config)
+        if cfg.get("meter_controls", False) and key in METER_STATE_KEYS:
+            # The matching number entity reads this same state topic.
+            client.publish(f"{cfg['discovery_prefix'].strip('/')}/{component}/{device_id}/{entity}/config",
+                           "", qos=1, retain=True)
+        else:
+            publish_config(client, cfg, component, device_id, entity, config)
         if isinstance(value, bool):
             payload = str(value).lower()
         elif isinstance(value, float):
@@ -937,6 +995,22 @@ def publish_comfort_power_readback(client, cfg):
             return True
     except Exception as exc:
         LOG.warning("Reading back comfort power failed: %s", exc)
+        return False
+
+def publish_meter_readback(client, cfg, name):
+    """Read one P1/smart-meter property back from the charger after a write."""
+    spec = METER_CONTROLS[name]
+    try:
+        with ALFEN_LOCK:
+            value = parse_property_number(run_alfen(cfg, "get", spec["property"], timeout=20), spec["property"])
+            if value is None:
+                LOG.warning("Could not read %s from alfenctl", spec["name"])
+                return False
+            root = cfg["mqtt_topic_prefix"].strip("/")
+            client.publish(f"{root}/state/{spec['state']}", format(value.normalize(), "f"), qos=1, retain=True)
+            return True
+    except Exception as exc:
+        LOG.warning("Reading back %s failed: %s", spec["name"], exc)
         return False
 
 def publish_solar_properties_readback(client, cfg):

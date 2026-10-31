@@ -74,6 +74,7 @@ Supervisor's MQTT service, so the Mosquitto add-on needs no configuration.
 | --- | --- | --- |
 | `limits.current_min` / `limits.current_max` | `6` / `32` | Range of the charging-current control in ampere (1–64). The charger's station-wide limit lowers the maximum further, live. |
 | `limits.comfort_power_max_kw` | `4.0` | Upper end of the Comfort power control, 1.35–11 kW in steps of 0.05. |
+| `limits.meter_current_max` | `63` | Upper bound (1–100 A) for the two smart-meter controls below. Set it to your main fuse rating. |
 | `limits.poll_interval` | `10` | Seconds to wait between polls (5–300). A delay after a poll completes, not a fixed sampling period. |
 | `limits.offline_after` | `300` | Seconds of failed polls before the entities become unavailable. During a shorter outage (for example a TLS handshake timeout) they keep their last value; *Last successful poll* shows the staleness. `0` marks them unavailable immediately. |
 
@@ -117,6 +118,7 @@ and `04AABBCCDDEEFF` are the same card.
 | Option | Default | Description |
 | --- | --- | --- |
 | `solar_controls` | `true` | Show *Comfort charging power*, *Green share* and *Charging mode*. Turn off when the firmware does not support load balancing; the entities are then removed and not polled. |
+| `meter_controls` | `false` | Adds writable *Maximum meter current* and *Safe current (P1 failsafe)* entities (see [Smart meter controls](#smart-meter-controls)). Off by default because they are installer settings of the grid connection. |
 | `log_level` | `info` | `debug` logs every `alfenctl` call with its duration; useful when troubleshooting. |
 
 ### Upgrading from versions before 0.2
@@ -132,7 +134,23 @@ All entities belong to the device **Alfen charger**, which links to the
 charger's own web interface. Entity names are relative to the device. Entity
 and unique IDs are stable between versions.
 
-### Controls
+### Smart meter controls
+
+With `meter_controls: true` two extra number entities (category *Configuration*,
+entered in a box, not a slider) can change load-balancing settings of the charger:
+
+| Entity | Charger setting | Range |
+| --- | --- | --- |
+| Maximum meter current | the grid connection limit that active load balancing keeps the house below (`alfenctl lb set --max-meter-current`) | 1 to `limits.meter_current_max` A |
+| Safe current (P1 failsafe) | the current the charger falls back to when the smart meter (P1) stops answering (`alfenctl lb set --safe-current`) | 0 to `limits.meter_current_max` A |
+
+Both accept whole amperes only. After each write the value is read back from
+the charger. They replace the read-only *Maximum installation current* and
+*Safe current limit* diagnostic sensors, which show the same values. A wrong
+*Maximum meter current* can overload your main fuse; set `limits.meter_current_max`
+to the real rating before enabling this.
+
+## Controls
 
 | Entity | Type | Notes |
 | --- | --- | --- |

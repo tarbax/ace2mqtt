@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.0-beta.7
+
+- Merged `main` into `beta` (flat legacy options stay removed).
+- New optional `meter_controls`: writable *Maximum meter current* and *Safe current (P1 failsafe)* number entities (`alfenctl lb set --max-meter-current / --safe-current`), bounded by the new `limits.meter_current_max` (default 63 A, whole amperes, read back after each write). They replace the read-only sensors of the same values.
+
 ## 0.2.0-beta.6
 
 - Remove the old flat configuration fields, their translations and automatic migration. Only the grouped configuration is supported; older installations must enter settings in the grouped layout.

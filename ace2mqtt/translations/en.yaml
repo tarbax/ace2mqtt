@@ -62,6 +62,9 @@ configuration:
       offline_after:
         name: Unavailable after (s)
         description: Entities keep their last value during a short charger outage and only become unavailable after this many seconds of failed polls. 0 marks them unavailable immediately.
+      meter_current_max:
+        name: Maximum meter/safe current limit (A)
+        description: Upper bound for the Maximum meter current and Safe current controls (1-100 A). Set it to the rating of your main fuse so a wrong value cannot be written.
   evcc:
     name: evcc
     description: Optional. Assigns a vehicle in evcc based on the RFID card that was used.
@@ -81,6 +84,9 @@ configuration:
   solar_controls:
     name: Solar controls
     description: Show Comfort power, Green share and Charging mode. Turn off when the firmware does not support them.
+  meter_controls:
+    name: Smart meter controls
+    description: Adds writable Maximum meter current and Safe current (P1 failsafe) entities. These are installer settings of the grid connection; leave off unless you need them.
   log_level:
     name: Log level
     description: Use debug to log every alfenctl call when troubleshooting.

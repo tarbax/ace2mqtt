@@ -30,7 +30,7 @@ class UpstreamContractTests(unittest.TestCase):
     def test_every_command_is_accepted_by_real_cli_parser(self):
         commands = [
             ('status', '--json'), ('current',), ('lb',),
-            ('get', '3280_3'), ('get', '3280_2'),
+            ('get', '3280_3'), ('get', '3280_2'), ('get', '3280_3', '3280_2'), ('get', '2067_0'), ('get', '2068_0'),
             ('socket', 'show', '2'), ('direct-start', 'show'),
             ('transactions', '--json', '--since', 'today', '--socket', '2'),
         ]
@@ -38,10 +38,11 @@ class UpstreamContractTests(unittest.TestCase):
                               ('charging_profile_override', 'ON'), ('charging_profile_override', 'OFF'),
                               ('current', '16'), ('comfort_power', '4.2'), ('green_share', '25'),
                               ('solar_mode', 'off'), ('solar_mode', 'comfort'), ('solar_mode', 'green'),
+                              ('max_meter_current', '25'), ('safe_current', '10'),
                               ('socket_enable', 'PRESS'), ('socket_disable', 'PRESS'),
                               ('direct_start_on', 'PRESS'), ('direct_start_off', 'PRESS')]:
             with patch('app.run_alfen') as run:
-                app.handle_command(CFG, f'ace2mqtt/control/{name}', payload)
+                app.handle_command({**CFG, 'meter_controls': True}, f'ace2mqtt/control/{name}', payload)
             commands.append(run.call_args.args[1:])
         parser = build_parser()
         for command in commands:

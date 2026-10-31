@@ -29,10 +29,12 @@ options:
     comfort_power_max_kw: 4.0
     poll_interval: 10
     offline_after: 300
+    meter_current_max: 63
   evcc:
     loadpoint: 1
     vehicles: []
   solar_controls: true
+  meter_controls: false
   log_level: "info"
 schema:
   charger:
@@ -55,6 +57,7 @@ schema:
     comfort_power_max_kw: float(1.35,11)
     poll_interval: int(5,300)
     offline_after: int(0,3600)
+    meter_current_max: int(1,100)
   evcc:
     url: url?
     loadpoint: int(1,)
@@ -63,4 +66,5 @@ schema:
       - uid: str
         vehicle: str
   solar_controls: bool
+  meter_controls: bool
   log_level: list(debug|info|warning|error)

@@ -1,4 +1,5 @@
 import json
+import types
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -109,6 +110,68 @@ class SolarReadbackTests(unittest.TestCase):
         client.publish.assert_called_once_with("ace2mqtt/state/green_share", "30", qos=1, retain=True)
 
 
+class MeterControlTests(unittest.TestCase):
+    ON = {**CFG, "meter_controls": True, "meter_current_max": 40}
+
+    @patch("app.run_alfen")
+    def test_meter_values_are_bounded_and_mapped_to_alfenctl_flags(self, run):
+        self.assertEqual(app.handle_command(self.ON, "ace2mqtt/control/max_meter_current", "25"), "25")
+        run.assert_called_with(self.ON, "lb", "set", "--max-meter-current", "25")
+        self.assertEqual(app.handle_command(self.ON, "ace2mqtt/control/safe_current", "0"), "0")
+        run.assert_called_with(self.ON, "lb", "set", "--safe-current", "0")
+        run.reset_mock()
+        for name, value in (("max_meter_current", "0"), ("max_meter_current", "41"), ("safe_current", "41"),
+                            ("safe_current", "-1"), ("max_meter_current", "25.5"), ("safe_current", "nan"),
+                            ("max_meter_current", "abc")):
+            with self.subTest(name=name, value=value), self.assertLogs(app.LOG, level="WARNING"):
+                self.assertIsNone(app.handle_command(self.ON, f"ace2mqtt/control/{name}", value))
+        run.assert_not_called()
+
+    @patch("app.run_alfen")
+    def test_meter_commands_are_ignored_unless_enabled(self, run):
+        with self.assertLogs(app.LOG, level="WARNING"):
+            self.assertIsNone(app.handle_command(CFG, "ace2mqtt/control/max_meter_current", "25"))
+        run.assert_not_called()
+
+    def test_command_publishes_value_read_back_from_the_charger(self):
+        client = Mock()
+        message = types.SimpleNamespace(topic="ace2mqtt/control/safe_current", payload=b"10", retain=False)
+        with patch("app.run_alfen", side_effect=["", "2068_0 sysActiveSafeCurrent 8.0 rw Safe current\n"]) as run:
+            app.on_message(client, self.ON, message)
+        self.assertEqual(run.call_args_list[1].args, (self.ON, "get", "2068_0"))
+        client.publish.assert_called_once_with("ace2mqtt/state/active_safe_current_a", "8", qos=1, retain=True)
+
+    def test_discovery_adds_numbers_and_hides_duplicate_sensors(self):
+        client = Mock()
+        status = {"max_installation_current_a": 25.0, "active_safe_current_a": 6.0}
+        app.publish_discovery(client, self.ON, status)
+        published = {c.args[0]: c.args[1] for c in client.publish.call_args_list}
+        number = json.loads(published["homeassistant/number/ace2mqtt_192_0_2_10/max_meter_current/config"])
+        self.assertEqual((number["min"], number["max"], number["mode"]), (1, 40, "box"))
+        self.assertEqual(number["state_topic"], "ace2mqtt/state/max_installation_current_a")
+        safe = json.loads(published["homeassistant/number/ace2mqtt_192_0_2_10/safe_current/config"])
+        self.assertEqual((safe["min"], safe["name"]), (0, "Safe current (P1 failsafe)"))
+        for entity in ("max_installation_current_a", "active_safe_current_a"):
+            self.assertEqual(published[f"homeassistant/sensor/ace2mqtt_192_0_2_10/{entity}/config"], "")
+        self.assertEqual(published["ace2mqtt/state/active_safe_current_a"], "6.00")
+
+    def test_disabled_removes_numbers_and_keeps_sensors(self):
+        client = Mock()
+        app.publish_discovery(client, CFG, {"active_safe_current_a": 6.0})
+        published = {c.args[0]: c.args[1] for c in client.publish.call_args_list}
+        self.assertEqual(published["homeassistant/number/ace2mqtt_192_0_2_10/safe_current/config"], "")
+        self.assertTrue(published["homeassistant/sensor/ace2mqtt_192_0_2_10/active_safe_current_a/config"])
+
+    def test_options_default_off_and_ceiling_is_validated(self):
+        cfg = app.normalize_options({"charger": {"host": "h"}})
+        self.assertFalse(cfg["meter_controls"])
+        self.assertEqual(cfg["meter_current_max"], 63)
+        self.assertTrue(app.normalize_options({"charger": {"host": "h"}, "meter_controls": True})["meter_controls"])
+        for bad in (0, 101, "x"):
+            with self.assertRaises(ValueError):
+                app.validate_options({**CFG, "meter_current_max": bad})
+
+
 class OutageToleranceTests(unittest.TestCase):
     def test_repeated_alfenctl_warning_is_logged_once(self):
         app.WARNING_LAST_LOGGED.clear()
@@ -179,7 +242,7 @@ class AddonManifestTests(unittest.TestCase):
             self.assertIn(name, self.config["options"][section])
 
     def test_only_current_groups_and_general_options_are_exposed(self):
-        expected = {"charger", "mqtt", "limits", "evcc", "solar_controls", "log_level"}
+        expected = {"charger", "mqtt", "limits", "evcc", "solar_controls", "meter_controls", "log_level"}
         self.assertEqual(set(self.config["schema"]), expected)
         self.assertEqual(set(self.config["options"]), expected)
         translations = yaml.safe_load((ADDON / "translations" / "en.yaml").read_text())["configuration"]
